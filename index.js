@@ -1,661 +1,775 @@
-import express from "express";
+const express = require("express");
 
 const app = express();
 app.use(express.json());
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const SECRET_PATH = process.env.SECRET_PATH;
+const SECRET_PATH = process.env.SECRET_PATH || "secret";
 const PORT = process.env.PORT || 3000;
 
-if (!BOT_TOKEN || !SECRET_PATH) {
-  console.error("BOT_TOKEN or SECRET_PATH is missing");
+if (!BOT_TOKEN) {
+  console.error("❌ BOT_TOKEN is missing");
   process.exit(1);
 }
 
-const API = `https://api.telegram.org/bot${BOT_TOKEN}`;
+const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
-// --- Player State ---
-const players = new Map(); // stores player state in RAM
+// =========================
+// In-memory game store
+// =========================
+const players = new Map();
 
-// --- Game Data ---
-const careers = {
-  // Basic Jobs
-  unemployed: { name: "بیکار", money: -10, energy: 5, happiness: -10, intelligence: 0, requires: null, min_age: 18, max_age: 60, description: "هیچ شغلی نداری و دخل و خرجت جور نیست." },
-  worker: { name: "کارگر ساده", money: 20, energy: -15, happiness: -5, intelligence: -2, requires: null, min_age: 18, max_age: 60, description: "یه شغل معمولی با درآمد کم و سختی زیاد." },
-  seller: { name: "فروشنده", money: 40, energy: -12, happiness: 0, intelligence: 3, requires: "high_school", min_age: 20, max_age: 60, description: "با مردم سروکار داری و کمیسیون می‌گیری." },
-  artist: { name: "هنرمند", money: 30, energy: -10, happiness: 10, intelligence: 5, requires: "university", min_age: 22, max_age: 55, description: "استعدادت رو به نمایش می‌ذاری، گاهی پولداری، گاهی نه." },
-  // Funny/Risky Jobs
-  "saggi": { name: "ساقی (پنهانی!)", money: 60, energy: -20, happiness: -15, intelligence: -5, requires: "middle_school", min_age: 20, max_age: 45, description: "کار خطرناک با درآمد خوب، ولی ریسک بالایی داره!", special_risk: "arrest_gambling", risk_chance: 0.3, risk_penalty: { money: -200, happiness: -25, alive: true } },
-  // Professional Jobs
-  doctor: { name: "پزشک", money: 100, energy: -25, happiness: 5, intelligence: 15, requires: "university", min_age: 28, max_age: 60, description: "زندگی مردم رو نجات می‌دی، ولی خیلی خسته‌کننده‌ست." },
-  entrepreneur: { name: "کارآفرین", money: 80, energy: -18, happiness: 15, intelligence: 10, requires: "university", min_age: 25, max_age: 55, description: "کسب و کار خودت رو راه می‌ندازی، پر از ریسک و موفقیت." },
-  teacher: { name: "معلم", money: 50, energy: -10, happiness: 10, intelligence: 8, requires: "university", min_age: 22, max_age: 60, description: "آینده‌سازان رو تربیت می‌کنی، با درآمد متوسط." },
-};
+// =========================
+// Helpers
+// =========================
+function rand(min, max) {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
 
-const educationLevels = {
-  none: { name: "بی‌سواد", intelligence_boost: 0, money_boost: -5, happiness_boost: -5, requires_age: 18, cost: 10, next: "primary_school", description: "هیچ مدرکی نداری." },
-  primary_school: { name: "ابتدایی", intelligence_boost: 5, money_boost: 0, happiness_boost: -2, requires_age: 19, cost: 20, next: "middle_school", description: "سوادت در حد خواندن و نوشتن اولیه است." },
-  middle_school: { name: "راهنمایی", intelligence_boost: 7, money_boost: 5, happiness_boost: 0, requires_age: 20, cost: 40, next: "high_school", description: "کمی از درس‌ها رو یاد گرفتی." },
-  high_school: { name: "دیپلم", intelligence_boost: 10, money_boost: 10, happiness_boost: 5, requires_age: 21, cost: 70, next: "university", description: "مدرک دیپلم داری و می‌تونی دنبال کار یا دانشگاه بری." },
-  university: { name: "دانشگاه", intelligence_boost: 15, money_boost: 20, happiness_boost: 10, requires_age: 24, cost: 150, next: "post_grad", description: "در یک رشته دانشگاهی تحصیل کردی." },
-  post_grad: { name: "فوق لیسانس/دکترا", intelligence_boost: 20, money_boost: 30, happiness_boost: 15, requires_age: 27, cost: 250, next: null, description: "متخصص در یک زمینه خاص شدی." },
-};
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
 
-// --- Helper Functions ---
-function clamp(value, min, max) { return Math.max(min, Math.min(max, value)); }
+function chance(probability) {
+  return Math.random() < probability;
+}
 
-function createPlayer(chatId, firstName) {
+function getEducationName(level) {
+  const map = {
+    0: "بی‌سواد رسمی ولی بااعتمادبه‌نفس",
+    1: "ابتدایی",
+    2: "راهنمایی",
+    3: "دبیرستان",
+    4: "لیسانس",
+    5: "فوق‌لیسانس",
+    6: "دکترا"
+  };
+  return map[level] || "نامشخص";
+}
+
+function getJobName(job) {
+  const jobs = {
+    none: "بیکار حرفه‌ای",
+    worker: "کارگر",
+    artist: "هنرمند",
+    bartender: "ساقی",
+    doctor: "پزشک",
+    entrepreneur: "کارآفرین"
+  };
+  return jobs[job] || "نامشخص";
+}
+
+function createNewPlayer(user) {
   return {
-    chatId,
-    name: firstName || "بازیکن",
+    id: user.id,
+    firstName: user.first_name || "رفیق",
     age: 18,
-    money: 50,
-    energy: 70,
-    intelligence: 40,
-    happiness: 50,
+    money: 1000,
+    energy: 80,
+    happiness: 70,
+    intelligence: 60,
     health: 80,
-    stage: "شروع جوانی",
-    career: "unemployed",
-    education: "none",
-    alive: true,
+    education: 3,
+    job: "none",
     married: false,
     children: 0,
-    has_car: false,
-    has_house: false,
-    relationships: {}, // Stores relationship levels with spouse, kids, etc.
-    achievements: [], // List of achievements
-    year_events: [], // To store events of the current year
+    house: false,
+    car: false,
+    alive: true,
+    log: ["زندگی از ۱۸ سالگی شروع شد."],
+    lastEvent: "هنوز هیچ گندی نزدی. امیدوارکننده‌ست."
   };
 }
 
-function getCareer(key) { return careers[key] || careers.unemployed; }
-function getEducation(key) { return educationLevels[key] || educationLevels.none; }
+function getPlayer(user) {
+  if (!players.has(user.id)) {
+    players.set(user.id, createNewPlayer(user));
+  }
+  return players.get(user.id);
+}
 
-function updatePlayerStats(player) {
-  const career = getCareer(player.career);
-  const education = getEducation(player.education);
+function resetPlayer(user) {
+  const player = createNewPlayer(user);
+  players.set(user.id, player);
+  return player;
+}
 
-  // Base stats update
-  player.intelligence = clamp(40 + education.intelligence_boost + career.intelligence, 0, 100);
-  player.money += career.money;
-  player.energy = clamp(player.energy + career.energy, 0, 100);
-  player.happiness = clamp(player.happiness + career.happiness + education.happiness_boost, 0, 100);
-  player.money += education.money_boost; // Cost/benefit of education
+function statBar(value) {
+  const full = Math.round(value / 10);
+  const empty = 10 - full;
+  return "🟩".repeat(full) + "⬜".repeat(empty);
+}
 
-  // Clamp stats
-  player.health = clamp(player.health, 0, 100);
-  player.money = clamp(player.money, -500, 99999); // Allow some debt
+function formatStatus(player) {
+  return `
+🎭 <b>وضعیت زندگی ${escapeHtml(player.firstName)}</b>
 
-  // Apply special career effects (like risks)
-  if (career.special_risk && Math.random() < career.risk_chance) {
-    player.money += career.risk_penalty?.money || 0;
-    player.happiness += career.risk_penalty?.happiness || 0;
-    if (career.risk_penalty?.alive === false) player.alive = false;
-    player.year_events.push(`\n⚠️ ریسک شغلی ${career.name}: ${career.description}`);
+👤 سن: <b>${player.age}</b>
+💰 پول: <b>${player.money}$</b>
+⚡ انرژی: <b>${player.energy}</b> ${statBar(player.energy)}
+😄 خوشحالی: <b>${player.happiness}</b> ${statBar(player.happiness)}
+🧠 هوش: <b>${player.intelligence}</b> ${statBar(player.intelligence)}
+❤️ سلامتی: <b>${player.health}</b> ${statBar(player.health)}
+
+🎓 تحصیلات: <b>${getEducationName(player.education)}</b>
+💼 شغل: <b>${getJobName(player.job)}</b>
+💍 ازدواج: <b>${player.married ? "داره" : "نداره"}</b>
+👶 بچه: <b>${player.children}</b>
+🏠 خانه: <b>${player.house ? "دارد" : "ندارد"}</b>
+🚗 ماشین: <b>${player.car ? "دارد" : "ندارد"}</b>
+
+📝 آخرین اتفاق:
+<i>${escapeHtml(player.lastEvent)}</i>
+  `.trim();
+}
+
+function escapeHtml(text = "") {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function mainMenuKeyboard() {
+  return {
+    inline_keyboard: [
+      [{ text: "📊 وضعیت من", callback_data: "menu_status" }],
+      [{ text: "⏭ سال بعد", callback_data: "next_year" }],
+      [{ text: "🎓 تحصیل", callback_data: "menu_education" }],
+      [{ text: "💼 شغل", callback_data: "menu_job" }],
+      [{ text: "🎉 تفریح", callback_data: "act_fun" }, { text: "😴 استراحت", callback_data: "act_rest" }],
+      [{ text: "💍 ازدواج", callback_data: "act_marry" }, { text: "👶 بچه‌دار شو", callback_data: "act_child" }],
+      [{ text: "🏠 خرید خانه", callback_data: "act_buy_house" }, { text: "🚗 خرید ماشین", callback_data: "act_buy_car" }],
+      [{ text: "🔄 شروع دوباره", callback_data: "restart_game" }]
+    ]
+  };
+}
+
+function educationKeyboard(player) {
+  return {
+    inline_keyboard: [
+      [{ text: "📘 تا مقطع بعدی ادامه تحصیل", callback_data: "study_next" }],
+      [{ text: "📊 وضعیت", callback_data: "menu_status" }],
+      [{ text: "⬅️ بازگشت", callback_data: "back_main" }]
+    ]
+  };
+}
+
+function jobsKeyboard() {
+  return {
+    inline_keyboard: [
+      [{ text: "👷 کارگر", callback_data: "job_worker" }, { text: "🎨 هنرمند", callback_data: "job_artist" }],
+      [{ text: "🍷 ساقی", callback_data: "job_bartender" }, { text: "🩺 پزشک", callback_data: "job_doctor" }],
+      [{ text: "💸 کارآفرین", callback_data: "job_entrepreneur" }],
+      [{ text: "⬅️ بازگشت", callback_data: "back_main" }]
+    ]
+  };
+}
+
+function startKeyboard() {
+  return {
+    inline_keyboard: [
+      [{ text: "🎮 شروع بازی", callback_data: "start_game" }]
+    ]
+  };
+}
+
+function gameOverKeyboard() {
+  return {
+    inline_keyboard: [
+      [{ text: "🔄 دوباره از نو", callback_data: "restart_game" }],
+      [{ text: "📊 دیدن وضعیت", callback_data: "menu_status" }]
+    ]
+  };
+}
+
+// =========================
+// Telegram API helpers
+// =========================
+async function telegram(method, payload) {
+  try {
+    const res = await fetch(`${TELEGRAM_API}/${method}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(payload)
+    });
+
+    const data = await res.json();
+    console.log(`📨 Telegram ${method}:`, JSON.stringify(data));
+
+    return data;
+  } catch (error) {
+    console.error(`❌ Telegram ${method} failed:`, error);
+    return null;
   }
 }
 
-function checkGameStatus(player) {
-  if (!player.alive) return "بازی تمام شده.";
-
-  if (player.energy <= 0) { player.alive = false; return "☠️ انرژی تو تموم شد. از فشار زندگی کم آوردی."; }
-  if (player.health <= 0) { player.alive = false; return "💔 سلامتیت به صفر رسید. جسمت دیگه نتونست دووم بیاره."; }
-  if (player.happiness <= 0) { player.alive = false; return "😔 خوشحالیت به صفر رسید. زندگی برات بی‌معنا شد."; }
-  if (player.money < -200) { player.alive = false; return "🏦 ورشکست شدی! بدهی‌هات خیلی زیاد شد."; }
-
-  if (player.age >= 60) { // Game ends at 60
-    player.alive = false;
-    let finalMsg = "🏁 زندگی شما به پایان رسید.\n\n";
-    finalMsg += `ثروت نهایی: ${player.money} 💰\n`;
-    finalMsg += `هوش: ${player.intelligence} 🧠\n`;
-    finalMsg += `سلامتی: ${player.health} ❤️\n`;
-    finalMsg += `خوشحالی: ${player.happiness} 😊\n`;
-    finalMsg += `تعداد فرزندان: ${player.children} 👶\n`;
-
-    if (player.money >= 15000 && player.happiness >= 70 && player.health >= 70) finalMsg += "🌟 شما یک زندگی بسیار موفق و پربار داشتید!";
-    else if (player.money >= 7000) finalMsg += "👍 زندگی خوبی داشتی، پر از تجربه‌ها و موفقیت‌های قابل قبول.";
-    else if (player.happiness >= 80) finalMsg += "🌈 شاید خیلی پولدار نشدی، ولی زندگی شاد و پرمحتوایی داشتی.";
-    else finalMsg += "🙂 زندگی شما فراز و نشیب‌های زیادی داشت.";
-    return finalMsg;
-  }
-  return null;
+async function sendMessage(chatId, text, extra = {}) {
+  return telegram("sendMessage", {
+    chat_id: chatId,
+    text,
+    parse_mode: "HTML",
+    ...extra
+  });
 }
 
-function getRandomEvent(player) {
-  const events = [];
-  const random = Math.random();
-
-  // --- Education Events ---
-  if (player.age >= getEducation(player.education).requires_age && getEducation(player.education).next) {
-      events.push(`edu_${getEducation(player.education).next}`);
-  }
-
-  // --- Career Events ---
-  // Try to find a new job if unemployed or if current job is below age limit
-  const currentCareer = getCareer(player.career);
-  if (player.age >= getCareer(player.career).min_age && player.age <= getCareer(player.career).max_age) {
-     if (player.career === "unemployed" && player.age >= 19 && random < 0.4) events.push("event_find_job");
-     // Chance to switch careers if job doesn't fit age or other factors
-     if (player.career !== "unemployed" && player.age >= getCareer(player.career).max_age - 5 && random < 0.3) events.push("event_change_career");
-  }
-
-  // --- Life Events ---
-  if (player.age >= 22 && random < 0.3) events.push("event_find_love");
-  if (player.married && player.age >= 24 && random < 0.2) events.push("event_have_child");
-  if (player.age >= 25 && random < 0.15) events.push("event_buy_car");
-  if (player.age >= 28 && random < 0.1) events.push("event_buy_house");
-  if (random < 0.1) events.push("event_random_illness");
-  if (random < 0.05) events.push("event_lottery_win");
-  if (random < 0.08) events.push("event_accident");
-  if (player.money > 500 && random < 0.1) events.push("event_investment_opportunity");
-  if (player.health < 50 && random < 0.2) events.push("event_health_scare");
-  if (player.happiness < 30 && random < 0.15) events.push("event_find_new_hobby");
-  
-  // BitLife-like crazy events
-  if (random < 0.03) events.push("event_alien_encounter"); // Very rare
-  if (random < 0.04) events.push("event_find_treasure");
-  if (random < 0.07) events.push("event_sudden_inheritance");
-  if (player.career === "saggi" && random < 0.15) events.push("event_saggi_risk_text"); // Specific text for the saggi risk
-
-  const uniqueEvents = [...new Set(events)];
-  return uniqueEvents.length > 0 ? uniqueEvents[Math.floor(Math.random() * uniqueEvents.length)] : null;
+async function editMessage(chatId, messageId, text, extra = {}) {
+  return telegram("editMessageText", {
+    chat_id: chatId,
+    message_id: messageId,
+    text,
+    parse_mode: "HTML",
+    ...extra
+  });
 }
 
-function processEvent(player, eventKey) {
-  let eventText = "";
-  const currentAge = player.age;
-  const random = Math.random();
+async function answerCallbackQuery(callbackQueryId, text = "") {
+  return telegram("answerCallbackQuery", {
+    callback_query_id: callbackQueryId,
+    text
+  });
+}
 
-  switch (eventKey) {
-    // --- Education ---
-    case "edu_primary_school": if (player.education === "none") { player.education = "primary_school"; eventText = "💡 فرصتی برای یادگیری پیدا کردی و ابتدایی رو با موفقیت تموم کردی!"; } break;
-    case "edu_middle_school": if (player.education === "primary_school") { player.education = "middle_school"; eventText = "📚 یادگیری رو ادامه دادی و راهنمایی رو با نمرات خوب تموم کردی."; } break;
-    case "edu_high_school": if (player.education === "middle_school") { player.education = "high_school"; eventText = "🎓 دیپلم گرفتی! حالا گزینه‌های بیشتری برای شغل و دانشگاه داری."; } break;
-    case "edu_university": if (player.education === "high_school") { player.education = "university"; eventText = "🎓 وارد دانشگاه شدی! آینده شغلیت روشن‌تر شد."; } break;
-    case "edu_post_grad": if (player.education === "university") { player.education = "post_grad"; eventText = "🏆 مدرک عالی گرفتی! در رشته خودت متخصص شدی."; } break;
+// =========================
+// Game logic
+// =========================
+function canBecomeDoctor(player) {
+  return player.education >= 4 && player.intelligence >= 70;
+}
 
-    // --- Career ---
-    case "event_find_job":
-      if (player.career === "unemployed") {
-        const availableCareers = Object.keys(careers).filter(c => {
-          const career = getCareer(c);
-          return player.age >= career.min_age && player.age <= career.max_age && 
-                 (career.requires === null || (getEducation(player.education)?.name && getEducation(player.education).name.includes(career.requires.replace("_school", " ")).replace("university", "دانشگاه"))) ; // Simplified check
-        });
-        if (availableCareers.length > 0) {
-          player.career = availableCareers[Math.floor(Math.random() * availableCareers.length)];
-          eventText = `💼 شغلی پیدا کردی: ${getCareer(player.career).name}! ${getCareer(player.career).description}`;
-        }
-      }
-      break;
-    case "event_change_career": // Allow changing career
-        const possibleCareers = Object.keys(careers).filter(c => {
-            const career = getCareer(c);
-            return player.age >= career.min_age && player.age <= career.max_age && 
-                   (career.requires === null || getEducation(player.education)?.name?.includes(career.requires.replace("_school", " ")).replace("university", "دانشگاه"));
-        });
-        if (possibleCareers.length > 1) { // More than 1 career available
-            const newCareerKey = possibleCareers[Math.floor(Math.random() * possibleCareers.length)];
-            if (newCareerKey !== player.career) {
-                player.career = newCareerKey;
-                eventText = `✨ مسیر شغلی‌ات عوض شد. حالا ${getCareer(player.career).name} هستی. ${getCareer(player.career).description}`;
-            }
-        }
-        break;
-        
-    // --- Life Events ---
-    case "event_find_love":
-      if (!player.married && player.age >= 22 && random < 0.6) {
-        player.married = true;
-        player.happiness += 15;
-        player.relationships.spouse = { happiness: 50 }; // Initial relationship
-        eventText = "❤️ با کسی آشنا شدی و زندگی مشترک رو شروع کردید! خوشحالی‌ات زیاد شد.";
-      }
-      break;
-    case "event_have_child":
-      if (player.married && player.children < 3 && random < 0.4) { // Max 3 kids for simplicity
-        player.children++;
-        player.happiness += 10;
-        player.energy -= 10;
-        player.relationships[`child_${player.children}`] = { happiness: 50 };
-        eventText = `👶 صاحب فرزند ${player.children}ام شدی! مسئولیت‌ها بیشتر شد ولی خوشحالی هم بیشتر.`;
-      }
-      break;
-    case "event_buy_car":
-      if (!player.has_car && player.money >= 200 && random < 0.7) {
-        player.has_car = true;
-        player.money -= 200;
-        player.happiness += 5;
-        eventText = "🚗 یه ماشین خریدی! رفت و آمدت راحت‌تر شد و حس خوبی داری.";
-      }
-      break;
-    case "event_buy_house":
-      if (!player.has_house && player.money >= 500 && random < 0.5) {
-        player.has_house = true;
-        player.money -= 500;
-        player.happiness += 15;
-        eventText = "🏡 خونه خریدی! دیگه جای امن و شخصی خودت رو داری.";
-      }
-      break;
-    case "event_random_illness":
-      if (player.health > 30 && random < 0.6) {
-        const severity = Math.floor(Math.random() * 30) + 10;
-        player.health -= severity;
-        player.happiness -= 10;
-        player.energy -= 10;
-        eventText = `🤒 مریض شدی! سلامتیت ${severity} تا کم شد و احساس ضعف می‌کنی.`;
-      }
-      break;
-    case "event_lottery_win":
-      if (random < 0.1) {
-        const amount = Math.floor(Math.random() * 1000) + 500;
-        player.money += amount;
-        player.happiness += 20;
-        eventText = `🍀 در لاتاری برنده شدی! ${amount} تا به حسابت اضافه شد!`;
-      }
-      break;
-      
-    case "event_accident":
-      if (player.has_car && random < 0.3) {
-        const damage = Math.floor(Math.random() * 40) + 20;
-        player.health -= damage;
-        player.money -= 100; // Repair costs
-        player.happiness -= 15;
-        eventText = `💥 تصادف کردی! سلامتیت ${damage} تا کم شد و باید ماشین رو تعمیر کنی.`;
-      }
-      break;
-      
-    case "event_investment_opportunity":
-      if (player.money >= 100 && random < 0.5) {
-         const investAmount = Math.floor(Math.random() * 100) + 50;
-         const returnAmount = investAmount * (random < 0.3 ? 1.5 : (random < 0.7 ? 1.1 : 0.8)); // Variable return
-         player.money -= investAmount;
-         player.money += Math.floor(returnAmount);
-         player.happiness += (returnAmount > investAmount ? 5 : -5);
-         eventText = `📈 فرصت سرمایه‌گذاری پیش اومد. ${investAmount} تا رو سرمایه‌گذاری کردی و ${Math.floor(returnAmount)} تا برگشت.`;
-      }
-      break;
-      
-    case "event_health_scare":
-      if (player.health < 50 && random < 0.7) {
-        const treatmentCost = Math.floor(Math.random() * 50) + 20;
-        player.money -= treatmentCost;
-        player.health += 10; // Slight improvement
-        player.happiness -= 10;
-        eventText = `🩺 یه مشکل سلامتی جدی داشتی، ولی با ${treatmentCost} تا هزینه درمان، بهتر شدی. مراقب سلامتیت باش!`;
-      }
-      break;
-      
-    case "event_find_new_hobby":
-      if (player.happiness < 30 && random < 0.5) {
-         const hobbies = ["نقاشی", "موسیقی", "ورزش", "کتابخوانی", "باغبانی"];
-         const hobby = hobbies[Math.floor(Math.random() * hobbies.length)];
-         player.happiness += 15;
-         player.energy -= 5;
-         eventText = `🎨 یه سرگرمی جدید پیدا کردی: ${hobby}! حال و هوات عوض شد.`;
-      }
-      break;
-      
-    // --- "BitLife" Crazy Events ---
-    case "event_alien_encounter": // Extremely rare
-      eventText = "👽 ناگهان یک بشقاب پرنده ظاهر شد و چند فضایی تو رو دزدیدن! بعد از چند روز تو رو برگردوندن ولی حافظه‌ات پاک شده بود!";
-      player.health = 50; player.happiness = 10; player.intelligence = 20; player.money = 0; // Reset stats
-      break;
-    case "event_find_treasure":
-      if (random < 0.2) {
-         const amount = Math.floor(Math.random() * 500) + 200;
-         player.money += amount;
-         player.happiness += 15;
-         eventText = `🗺️ یه نقشه گنج پیدا کردی و کلی طلا پیدا کردی! ${amount} تا به دست آوردی!`;
-      }
-      break;
-    case "event_sudden_inheritance":
-      if (random < 0.1) {
-         const amount = Math.floor(Math.random() * 2000) + 1000;
-         player.money += amount;
-         player.happiness += 25;
-         eventText = `📜 ارثیه هنگفتی از یک فامیل دورافتاده بهت رسید! ${amount} تا پولدار شدی!`;
-      }
-      break;
-    case "event_saggi_risk_text": // Just flavor text for saggi risk
-        eventText = "⚠️ در کار خلاف، حسابی ریسک کردی و نزدیک بود گیر بیفتی!";
-        break;
-        
+function canBecomeEntrepreneur(player) {
+  return player.money >= 2000 || player.intelligence >= 75;
+}
+
+function getYearlySalary(player) {
+  switch (player.job) {
+    case "worker":
+      return rand(700, 1400);
+    case "artist":
+      return rand(300, 2600);
+    case "bartender":
+      return rand(800, 2200);
+    case "doctor":
+      return rand(2500, 5000);
+    case "entrepreneur":
+      return rand(-1500, 7000);
     default:
-      break;
+      return 0;
   }
-  if (eventText) player.year_events.push(eventText);
+}
+
+function applyJobEffect(player) {
+  if (player.job === "worker") {
+    player.energy -= rand(8, 14);
+    player.health -= rand(2, 6);
+  } else if (player.job === "artist") {
+    player.happiness += rand(4, 10);
+    player.money += rand(-200, 400);
+  } else if (player.job === "bartender") {
+    player.money += rand(200, 700);
+    player.health -= rand(4, 12);
+    player.happiness += rand(-4, 8);
+  } else if (player.job === "doctor") {
+    player.money += rand(400, 900);
+    player.energy -= rand(6, 12);
+    player.intelligence += rand(1, 3);
+  } else if (player.job === "entrepreneur") {
+    const roll = Math.random();
+    if (roll < 0.25) {
+      player.money -= rand(500, 2000);
+      player.lastEvent = "استارتاپت مثل یخ وسط تابستون آب شد.";
+    } else if (roll < 0.70) {
+      player.money += rand(500, 2500);
+      player.lastEvent = "یه قرارداد بستی و فعلاً قیافه موفق‌ها رو گرفتی.";
+    } else {
+      player.money += rand(2500, 6000);
+      player.lastEvent = "استارتاپ ترکوند! همه می‌گن نابغه‌ای، خودت می‌دونی شانسی بود.";
+    }
+    player.energy -= rand(8, 16);
+    player.happiness += rand(-5, 6);
+  }
+}
+
+function randomEvent(player) {
+  const roll = Math.random();
+
+  if (roll < 0.10) {
+    const prize = rand(500, 5000);
+    player.money += prize;
+    player.happiness += 10;
+    player.lastEvent = `لاتاری بردی و ${prize}$ خورد تو حسابت. بالاخره دنیا یه بار هم بهت لبخند زد.`;
+  } else if (roll < 0.20) {
+    const loss = rand(200, 2000);
+    player.money -= loss;
+    player.happiness -= 8;
+    player.lastEvent = `یه خرج الکی ${loss}$ رو دستت گذاشت. زندگی گفت سورپرایز.`;
+  } else if (roll < 0.28) {
+    player.health -= rand(8, 18);
+    player.money -= rand(100, 700);
+    player.lastEvent = "یه تصادف تابلو کردی. زنده‌ای، ولی با آبروی کمتر.";
+  } else if (roll < 0.36) {
+    player.intelligence += rand(3, 8);
+    player.lastEvent = "یه کتاب خوب خوندی و ناگهان مغزت روشن شد.";
+  } else if (roll < 0.44) {
+    player.happiness += rand(8, 15);
+    player.lastEvent = "یه سفر خفن رفتی و چند روزی آدم شدی.";
+  } else if (roll < 0.50) {
+    player.energy += rand(10, 18);
+    player.health += rand(4, 10);
+    player.lastEvent = "غذا و خواب درست‌حسابی داشتی؛ بدنِ محترم تشکر کرد.";
+  } else if (roll < 0.56) {
+    player.money += rand(200, 1500);
+    player.lastEvent = "یه کار رندانه کردی و یه پولی از جیب دنیا کشیدی بیرون.";
+  } else if (roll < 0.62) {
+    player.happiness -= rand(6, 12);
+    player.lastEvent = "عشق یک‌طرفه دوباره اومد سراغت. چه چیز مزخرفی.";
+  } else if (roll < 0.68) {
+    player.health += rand(5, 10);
+    player.lastEvent = "چکاپ دادی و دکتر گفت فعلاً نمی‌میری. خبر خوبیه.";
+  } else if (roll < 0.73) {
+    player.money += rand(1000, 4000);
+    player.lastEvent = "یه آشنای دور از ناکجاآباد یه ارث ریز و مشکوک برات گذاشت.";
+  } else if (roll < 0.78) {
+    player.happiness += 5;
+    player.intelligence += 4;
+    player.lastEvent = "با یه آدم باحال آشنا شدی. فعلاً زندگی بوی لجن نمی‌ده.";
+  } else if (roll < 0.83) {
+    player.money -= rand(300, 1200);
+    player.health -= rand(3, 8);
+    player.lastEvent = "مریض شدی و پول دوا دکتر ازت انتقام گرفت.";
+  } else if (roll < 0.88) {
+    player.happiness += 12;
+    player.lastEvent = "یه مهمونی رفتی که بعدش تا یک هفته الکی لبخند می‌زدی.";
+  } else if (roll < 0.93) {
+    player.intelligence -= rand(1, 5);
+    player.lastEvent = "یه مدت خیلی احمقانه تصمیم گرفتی. نگران نباش، طبیعیته.";
+  } else {
+    player.money += rand(500, 2500);
+    player.happiness += rand(5, 10);
+    player.lastEvent = "شایعه شده فضایی‌ها برکت دادن به زندگیت. توضیح منطقی نداریم.";
+  }
 }
 
 function processYear(player) {
-  player.year_events = []; // Clear previous year's events
-  
-  // Apply base job/education effects for the year
-  updatePlayerStats(player);
-  
-  // Introduce random events
-  const eventKey = getRandomEvent(player);
-  if (eventKey) {
-    processEvent(player, eventKey);
-  }
-  
-  // End of year checks & adjustments
-  const gameOverMessage = checkGameStatus(player);
-  if (gameOverMessage) return gameOverMessage; // Game ended this year
-
-  // Age, energy, happiness naturally change
   player.age += 1;
-  player.energy = clamp(player.energy - 5 - (player.career === 'doctor' ? 5 : 0) - (player.children > 0 ? 5 : 0), 0, 100); // More drain for doctor/parents
-  player.happiness = clamp(player.happiness - 2 - (player.career === 'unemployed' ? 5 : 0) - (player.married ? -2 : 0), 0, 100); // Unemployed lose more happiness
 
-  // Check if still alive after end-of-year stat adjustments
-  const stillAlive = checkGameStatus(player);
-  if (stillAlive) {
-     player.year_events.push(`\n📅 وارد ${player.age} سالگی شدی.`);
-  }
-  
-  // Update player's career based on age limits if needed
-  if (player.age > getCareer(player.career).max_age) {
-      player.career = "unemployed";
-      player.year_events.push("\n💀 شغل قبلی شما به دلیل بالا رفتن سن دیگر مناسب نیست. بیکار شدید.");
+  // base effects
+  player.energy -= rand(4, 10);
+  player.happiness -= rand(1, 4);
+  player.health -= rand(1, 5);
+
+  // family costs
+  if (player.married) {
+    player.money -= rand(150, 500);
+    player.happiness += rand(-2, 5);
   }
 
-  return stillAlive; // Return game over message if ended, null otherwise
-}
-
-// --- Keyboards ---
-function mainMenuMarkup() {
-  return { reply_markup: { inline_keyboard: [[{ text: "🌟 شروع بازی زندگی", callback_data: "start_game" }], [{ text: "❓ راهنما", callback_data: "help" }]] }};
-}
-function backToMenuMarkup() {
-  return { reply_markup: { inline_keyboard: [[{ text: "🏠 بازگشت به منو", callback_data: "main_menu" }]] }};
-}
-
-function educationMenuMarkup(player) {
-  const currentEduKey = player.education;
-  const options = [];
-  let nextEduKey = getEducation(currentEduKey)?.next;
-  
-  while(nextEduKey) {
-      const edu = getEducation(nextEduKey);
-      options.push({ text: `${edu.name} (هزینه: ${edu.cost} 💰)`, data: `edu_${nextEduKey}` });
-      nextEduKey = edu.next;
+  if (player.children > 0) {
+    player.money -= player.children * rand(200, 500);
+    player.energy -= player.children * rand(1, 3);
+    player.happiness += player.children * rand(0, 2);
   }
-  return { inline_keyboard: [options, [{text: "❌ انصراف", data: "cancel_edu"}]] };
-}
 
-function careerMenuMarkup(player) {
-  const options = [];
-  const currentCareerKey = player.career;
-  const currentEduLevel = player.education;
-  const playerAge = player.age;
+  // house & car expenses
+  if (player.house) {
+    player.money -= rand(100, 300);
+  }
 
-  for (const [key, career] of Object.entries(careers)) {
-    if (key === currentCareerKey) continue;
-    if (playerAge < career.min_age || playerAge > career.max_age) continue; // Age restriction
+  if (player.car) {
+    player.money -= rand(100, 400);
+  }
 
-    let canTakeJob = false;
-    const requiredEduKey = career.requires;
-    if (!requiredEduKey) {
-      canTakeJob = true;
-    } else {
-      // Check if player's education level meets the requirement
-      let tempEduKey = currentEduLevel;
-      while(tempEduKey) {
-        if (tempEduKey === requiredEduKey) {
-          canTakeJob = true;
-          break;
-        }
-        tempEduKey = getEducation(tempEduKey)?.next; // Check higher education levels too
-      }
-    }
+  // salary
+  const salary = getYearlySalary(player);
+  player.money += salary;
 
-    if (canTakeJob) {
-      options.push({ text: `${career.name} (${career.money} 💰)`, data: `career_${key}` });
+  // job effects
+  applyJobEffect(player);
+
+  // random event
+  if (!player.lastEvent || player.lastEvent.includes("شروع")) {
+    randomEvent(player);
+  } else {
+    if (chance(0.75)) {
+      randomEvent(player);
     }
   }
-  return { inline_keyboard: [options, [{text: "❌ انصراف", data: "cancel_career"}]] };
-}
 
-function lifeMenuMarkup(player) {
-  const keyboard = [];
-  // Education & Career options
-  if (player.age < 60) {
-      keyboard.push([{ text: "📚 تغییر تحصیلات", callback_data: "change_edu" }]);
-      keyboard.push([{ text: "💼 تغییر شغل", callback_data: "change_career" }]);
+  // age effects
+  if (player.age >= 40) {
+    player.health -= rand(1, 4);
+    player.energy -= rand(1, 3);
   }
-  // Life Actions
-  if (player.age >= 22 && !player.married && player.happiness > 40) keyboard.push([{ text: "💍 ازدواج", callback_data: "act_marry" }]);
-  if (!player.has_car && player.money >= 200 && player.age >= 25) keyboard.push([{ text: "🚗 خرید ماشین", callback_data: "act_buy_car" }]);
-  if (!player.has_house && player.money >= 500 && player.age >= 28) keyboard.push([{ text: "🏡 خرید خانه", callback_data: "act_buy_house" }]);
-  if (player.married && player.age >= 24 && player.children < 3) keyboard.push([{ text: "👶 بچه‌دار شدن", callback_data: "act_have_child" }]);
-  
-  // Status and Progression
-  keyboard.push([{ text: "📊 وضعیت فعلی", callback_data: "show_stats" }]);
-  if (player.age < 60) keyboard.push([{ text: "➡️ سال بعد", callback_data: "next_year" }]);
-  keyboard.push([{ text: "🛑 پایان بازی", callback_data: "end_game" }]);
 
-  return { reply_markup: { inline_keyboard: keyboard } };
-}
-
-function statsText(player) {
-  let text = `👤 نام: ${player.name}\n`;
-  text += `🎂 سن: ${player.age}\n`;
-  text += `💰 پول: ${player.money} 💰\n`;
-  text += `⚡ انرژی: ${player.energy} / 100\n`;
-  text += `🧠 هوش: ${player.intelligence} / 100\n`;
-  text += `😊 خوشحالی: ${player.happiness} / 100\n`;
-  text += `❤️ سلامتی: ${player.health} / 100\n`;
-  text += `🎓 تحصیلات: ${getEducation(player.education).name}\n`;
-  text += `💼 شغل: ${getCareer(player.career).name}\n`;
-  text += `📍 وضعیت: ${player.stage}\n`;
-  if (player.married) text += "💍 متاهل\n";
-  if (player.children > 0) text += `👶 فرزندان: ${player.children}\n`;
-  if (player.has_car) text += "🚗 صاحب خودرو\n";
-  if (player.has_house) text += "🏡 صاحب خانه\n";
-  return text;
-}
-
-// --- Webhook Route ---
-app.post(`/webhook/${SECRET_PATH}`, async (req, res) => {
-  res.sendStatus(200);
-  const update = req.body;
-
-  try {
-    // --- Message Handling ---
-    if (update.message?.text) {
-      const chatId = update.message.chat.id;
-      const firstName = update.message.from?.first_name || "بازیکن";
-
-      if (update.message.text === "/start") {
-        players.delete(chatId);
-        await telegram("sendMessage", {
-          chat_id: chatId,
-          text: `سلام ${firstName}! 👋\nبه بازی «زندگی پر فراز و نشیب» خوش اومدی!\nآماده‌ای که زندگی خودت رو بسازی؟`,
-          ...mainMenuMarkup(),
-        });
-      }
-    }
-
-    // --- Callback Query Handling ---
-    if (update.callback_query) {
-      const cq = update.callback_query;
-      const chatId = cq.message.chat.id;
-      const messageId = cq.message.message_id;
-      const data = cq.data;
-      const firstName = cq.from?.first_name || "بازیکن";
-
-      await telegram("answerCallbackQuery", { callback_query_id: cq.id });
-
-      let player = players.get(chatId);
-
-      // --- Main Menu Actions ---
-      if (data === "main_menu") {
-        players.delete(chatId);
-        await telegram("editMessageText", { chat_id: chatId, message_id: messageId, text: `سلام ${firstName}! 👋\nبه منوی اصلی خوش اومدی.\nآماده‌ای زندگی رو بسازی؟`, ...mainMenuMarkup() });
-        return;
-      }
-      if (data === "help") {
-        await telegram("editMessageText", { chat_id: chatId, message_id: messageId, text: "راهنما:\n" +
-          "اینجا باید با تصمیم‌هات زندگی خودت رو شکل بدی. هر انتخاب مسیر رو عوض می‌کنه.\n" +
-          "شغل، تحصیلات، اتفاقات و تصمیم‌های تو روی همه چیز اثر می‌ذاره.\n" +
-          "هدف اینه که تا سن 60 سالگی، زندگی خوبی داشته باشی!", ...backToMenuMarkup() });
-        return;
-      }
-      if (data === "start_game") {
-        player = createPlayer(chatId, firstName);
-        players.set(chatId, player);
-        await telegram("editMessageText", { chat_id: chatId, message_id: messageId, text: `🎮 بازی شروع شد!\n\nتو ${player.age} سالته و اول راهی.\nبیا اولین تصمیمت رو بگیر:\n\n${statsText(player)}`, ...lifeMenuMarkup(player) });
-        return;
-      }
-
-      // --- Game in Progress Checks ---
-      if (!player) {
-        await telegram("editMessageText", { chat_id: chatId, message_id: messageId, text: "⚠️ اول باید بازی رو از منوی اصلی شروع کنی.", ...mainMenuMarkup() });
-        return;
-      }
-
-      // --- State Modifying Actions ---
-      if (data === "show_stats") {
-        await telegram("editMessageText", { chat_id: chatId, message_id: messageId, text: `📊 وضعیت فعلی تو:\n\n${statsText(player)}`, ...lifeMenuMarkup(player) });
-      }
-      
-      // --- Education ---
-      else if (data === "change_edu") {
-        await telegram("editMessageText", { chat_id: chatId, message_id: messageId, text: "📚 کدوم مقطع تحصیلی رو می‌خوای ادامه بدی؟", ...educationMenuMarkup(player) });
-      } else if (data.startsWith("edu_")) {
-        const newEduKey = data.split('_')[1];
-        const edu = getEducation(newEduKey);
-        if (edu && player.education !== newEduKey && player.age >= edu.requires_age) {
-           if (player.money >= edu.cost && player.energy >= 15) {
-             player.education = newEduKey;
-             player.money -= edu.cost;
-             player.energy -= 15;
-             player.stage = `در حال تحصیل (${edu.name})`;
-             player.year_events.push(`\n📚 ${edu.name} را شروع کردی. ${edu.description}`);
-             await telegram("editMessageText", { chat_id: chatId, message_id: messageId, text: `✅ تحصیلاتت به ${edu.name} ارتقا پیدا کرد.\n\n${statsText(player)}`, ...lifeMenuMarkup(player) });
-           } else {
-              await telegram("editMessageText", { chat_id: chatId, message_id: messageId, text: "❌ پول یا انرژی کافی برای این مقطع تحصیلی نداری.", ...lifeMenuMarkup(player) });
-           }
-        } else if (player.age < edu?.requires_age) {
-           await telegram("editMessageText", { chat_id: chatId, message_id: messageId, text: `❌ هنوز برای ${edu.name} زود است. باید حداقل ${edu.requires_age} ساله باشی.`, ...lifeMenuMarkup(player) });
-        } else {
-           await telegram("editMessageText", { chat_id: chatId, message_id: messageId, text: "❌ امکان ارتقا وجود ندارد.", ...lifeMenuMarkup(player) });
-        }
-      } else if (data === "cancel_edu") {
-          await telegram("editMessageText", { chat_id: chatId, message_id: messageId, text: `وضعیت فعلی:\n${statsText(player)}`, ...lifeMenuMarkup(player) });
-      }
-      
-      // --- Career ---
-      else if (data === "change_career") {
-          await telegram("editMessageText", { chat_id: chatId, message_id: messageId, text: "💼 شغل جدیدی انتخاب کن:", ...careerMenuMarkup(player) });
-      } else if (data.startsWith("career_")) {
-          const newCareerKey = data.split('_')[1];
-          const career = getCareer(newCareerKey);
-          if (career && player.career !== newCareerKey && player.age >= career.min_age && player.age <= career.max_age) {
-              const requiredEduKey = career.requires;
-              let educationMet = false;
-              if (!requiredEduKey) educationMet = true;
-              else {
-                  let tempEduKey = player.education;
-                  while(tempEduKey) {
-                    if (tempEduKey === requiredEduKey) { educationMet = true; break; }
-                    tempEduKey = getEducation(tempEduKey)?.next;
-                  }
-              }
-
-              if (educationMet) {
-                  player.career = newCareerKey;
-                  player.stage = `مشغول به کار (${career.name})`;
-                  player.year_events.push(`\n✨ شغل جدید: ${career.name}. ${career.description}`);
-                  updatePlayerStats(player); // Re-calculate stats with new career
-                  await telegram("editMessageText", { chat_id: chatId, message_id: messageId, text: `✅ شغل جدیدت ${career.name} است.\n\n${statsText(player)}`, ...lifeMenuMarkup(player) });
-              } else {
-                  await telegram("editMessageText", { chat_id: chatId, message_id: messageId, text: `❌ برای این شغل به مدرک ${getEducation(requiredEduKey)?.name || 'مورد نیاز'} نیاز داری.`, ...lifeMenuMarkup(player) });
-              }
-          } else if (player.age < career.min_age || player.age > career.max_age) {
-             await telegram("editMessageText", { chat_id: chatId, message_id: messageId, text: `❌ این شغل برای سن شما مناسب نیست (باید بین ${career.min_age} تا ${career.max_age} سال باشی).`, ...lifeMenuMarkup(player) });
-          } else {
-              await telegram("editMessageText", { chat_id: chatId, message_id: messageId, text: "❌ امکان تغییر شغل وجود ندارد.", ...lifeMenuMarkup(player) });
-          }
-      } else if (data === "cancel_career") {
-          await telegram("editMessageText", { chat_id: chatId, message_id: messageId, text: `وضعیت فعلی:\n${statsText(player)}`, ...lifeMenuMarkup(player) });
-      }
-      
-      // --- One-time Life Actions ---
-      else if (data === "act_marry") {
-          if (!player.married && player.age >= 22 && player.happiness > 40 && random < 0.6) {
-              player.married = true;
-              player.happiness += 15;
-              player.stage = "متاهل";
-              player.relationships.spouse = { happiness: 50 };
-              player.year_events.push("❤️ با کسی آشنا شدی و ازدواج کردید! زندگی مشترک شروع شد.");
-              await telegram("editMessageText", { chat_id: chatId, message_id: messageId, text: `❤️ ازدواج کردی!\n\n${statsText(player)}`, ...lifeMenuMarkup(player) });
-          } else {
-              await telegram("editMessageText", { chat_id: chatId, message_id: messageId, text: "هنوز فرصت ازدواج مناسب نیست، پول یا خوشحالی کافی نداری، یا شانسش رو نداشتی.", ...lifeMenuMarkup(player) });
-          }
-      } else if (data === "act_buy_car") {
-          if (!player.has_car && player.money >= 200 && player.age >= 25 && random < 0.8) {
-              player.has_car = true;
-              player.money -= 200;
-              player.happiness += 5;
-              player.year_events.push("🚗 یه ماشین خریدی! رفت و آمدت راحت‌تر شد.");
-              await telegram("editMessageText", { chat_id: chatId, message_id: messageId, text: `🚗 ماشین خریدی!\n\n${statsText(player)}`, ...lifeMenuMarkup(player) });
-          } else {
-              await telegram("editMessageText", { chat_id: chatId, message_id: messageId, text: "پول، سن، یا شانس کافی برای خرید ماشین نداشتی.", ...lifeMenuMarkup(player) });
-          }
-      } else if (data === "act_buy_house") {
-           if (!player.has_house && player.money >= 500 && player.age >= 28 && random < 0.6) {
-              player.has_house = true;
-              player.money -= 500;
-              player.happiness += 15;
-              player.year_events.push("🏡 خونه خریدی! دیگه جای امنی داری.");
-              await telegram("editMessageText", { chat_id: chatId, message_id: messageId, text: `🏡 خونه خریدی!\n\n${statsText(player)}`, ...lifeMenuMarkup(player) });
-           } else {
-               await telegram("editMessageText", { chat_id: chatId, message_id: messageId, text: "پول، سن، یا شانس کافی برای خرید خانه نداشتی.", ...lifeMenuMarkup(player) });
-           }
-      } else if (data === "act_have_child") {
-          if (player.married && player.children < 3 && player.age >= 24 && player.energy >= 40 && player.happiness >= 50 && random < 0.5) {
-              player.children++;
-              player.happiness += 10;
-              player.energy -= 10;
-              player.relationships[`child_${player.children}`] = { happiness: 50 };
-              player.year_events.push(`👶 صاحب فرزند ${player.children}ام شدی!`);
-              await telegram("editMessageText", { chat_id: chatId, message_id: messageId, text: `👶 فرزند ${player.children} به خانواده اضافه شد!\n\n${statsText(player)}`, ...lifeMenuMarkup(player) });
-          } else {
-               await telegram("editMessageText", { chat_id: chatId, message_id: messageId, text: "شرایط سنی، انرژی، خوشحالی، یا شانس برای بچه‌دار شدن مناسب نبود.", ...lifeMenuMarkup(player) });
-          }
-      }
-      
-      // --- Year Progression ---
-      else if (data === "next_year") {
-        const gameOverMessage = processYear(player);
-        
-        let messageText = "";
-        if (gameOverMessage) {
-          messageText = gameOverMessage;
-          players.delete(chatId); // Game over, clear player state
-          await telegram("editMessageText", { chat_id: chatId, message_id: messageId, text: `${messageText}\n\n${statsText(player)}`, ...backToMenuMarkup() });
-        } else {
-          if (player.year_events.length > 0) messageText += player.year_events.join("\n");
-          messageText += `\n\n${statsText(player)}`;
-          await telegram("editMessageText", { chat_id: chatId, message_id: messageId, text: messageText, ...lifeMenuMarkup(player) });
-        }
-      } else if (data === "end_game") {
-        player.alive = false;
-        const finalMessage = checkGameStatus(player);
-        await telegram("editMessageText", { chat_id: chatId, message_id: messageId, text: `🛑 شما بازی را زودتر از موعد به پایان رساندید.\n\n${finalMessage}\n\n${statsText(player)}`, ...backToMenuMarkup() });
-        players.delete(chatId);
-      }
-    }
-  } catch (err) {
-    console.error("Webhook processing error:", err);
-    if (update.callback_query) {
-        await telegram("sendMessage", { chat_id: update.callback_query.message.chat.id, text: "خطایی در پردازش رخ داد. لطفاً دوباره امتحان کنید." });
-    }
+  if (player.age >= 55) {
+    player.health -= rand(2, 6);
   }
+
+  // clamp
+  player.energy = clamp(player.energy, 0, 100);
+  player.happiness = clamp(player.happiness, 0, 100);
+  player.intelligence = clamp(player.intelligence, 0, 100);
+  player.health = clamp(player.health, 0, 100);
+
+  // money can go negative
+  player.log.push(`در ${player.age} سالگی: ${player.lastEvent}`);
+}
+
+function checkGameStatus(player) {
+  if (player.health <= 0) {
+    player.alive = false;
+    return {
+      over: true,
+      text: "☠️ <b>پایان بازی</b>\nسلامتی‌ات ته کشید و عمرت به آخر رسید. زیادم تعجب نداره با این سبک زندگی."
+    };
+  }
+
+  if (player.energy <= 0) {
+    player.alive = false;
+    return {
+      over: true,
+      text: "💀 <b>پایان بازی</b>\nاز شدت فرسودگی و بی‌انرژی بودن، عملاً سیستم خاموش شد."
+    };
+  }
+
+  if (player.money < -5000) {
+    player.alive = false;
+    return {
+      over: true,
+      text: "💸 <b>پایان بازی</b>\nورشکست شدی و زندگی با لگد پرتت کرد بیرون."
+    };
+  }
+
+  if (player.age >= 60) {
+    player.alive = false;
+
+    let title = "زندگی معمولی";
+    if (player.money >= 30000 && player.happiness >= 70) {
+      title = "افسانه پولدارِ خوشحال";
+    } else if (player.money >= 20000) {
+      title = "پیرِ پولدار";
+    } else if (player.education >= 5 && player.job === "doctor") {
+      title = "فرهیخته‌ی زحمتکش";
+    } else if (player.children >= 2 && player.married) {
+      title = "خانواده‌سالارِ خسته";
+    } else if (player.job === "artist" && player.happiness >= 75) {
+      title = "هنرمندِ دیوانه ولی راضی";
+    }
+
+    return {
+      over: true,
+      text: `🎬 <b>پایان زندگی</b>\nتو تا ۶۰ سالگی زنده موندی.\n🏆 لقب نهایی تو: <b>${title}</b>`
+    };
+  }
+
+  return { over: false };
+}
+
+// =========================
+// Screens
+// =========================
+async function showWelcome(chatId, firstName = "رفیق") {
+  const text = `
+🎮 <b>بازی زندگی طنز</b>
+
+سلام <b>${escapeHtml(firstName)}</b>!
+اینجا قراره از ۱۸ سالگی زندگیتو جلو ببری:
+تحصیل کنی، کار پیدا کنی، پول دربیاری، عشق و بدبختی بچشی و ببینی آخرش چی از آب درمیای 😈
+
+برای شروع روی دکمه زیر بزن.
+  `.trim();
+
+  return sendMessage(chatId, text, {
+    reply_markup: startKeyboard()
+  });
+}
+
+async function showMainMenu(chatId, player, messageId = null) {
+  const text = formatStatus(player);
+
+  if (messageId) {
+    return editMessage(chatId, messageId, text, {
+      reply_markup: mainMenuKeyboard()
+    });
+  }
+
+  return sendMessage(chatId, text, {
+    reply_markup: mainMenuKeyboard()
+  });
+}
+
+async function showEducationMenu(chatId, player, messageId) {
+  const text = `
+🎓 <b>بخش تحصیل</b>
+
+سطح فعلی: <b>${getEducationName(player.education)}</b>
+
+هر بار ادامه تحصیل:
+- کمی پول کم می‌کند
+- هوش را زیاد می‌کند
+- آینده شغلی را بهتر می‌کند
+
+می‌خوای ادامه بدی یا برگردی؟
+  `.trim();
+
+  return editMessage(chatId, messageId, text, {
+    reply_markup: educationKeyboard(player)
+  });
+}
+
+async function showJobMenu(chatId, player, messageId) {
+  const text = `
+💼 <b>بخش شغل</b>
+
+شغل فعلی: <b>${getJobName(player.job)}</b>
+
+شرایط بعضی شغل‌ها:
+🩺 پزشک: حداقل لیسانس + هوش بالا
+💸 کارآفرین: پول اولیه یا هوش مناسب
+
+یکی رو انتخاب کن.
+  `.trim();
+
+  return editMessage(chatId, messageId, text, {
+    reply_markup: jobsKeyboard()
+  });
+}
+
+async function showGameOver(chatId, player, gameOverText, messageId = null) {
+  const finalText = `
+${gameOverText}
+
+📊 <b>خلاصه نهایی</b>
+👤 سن: <b>${player.age}</b>
+💰 پول: <b>${player.money}$</b>
+🎓 تحصیلات: <b>${getEducationName(player.education)}</b>
+💼 شغل: <b>${getJobName(player.job)}</b>
+💍 ازدواج: <b>${player.married ? "بله" : "خیر"}</b>
+👶 بچه: <b>${player.children}</b>
+🏠 خانه: <b>${player.house ? "دارد" : "ندارد"}</b>
+🚗 ماشین: <b>${player.car ? "دارد" : "ندارد"}</b>
+  `.trim();
+
+  if (messageId) {
+    return editMessage(chatId, messageId, finalText, {
+      reply_markup: gameOverKeyboard()
+    });
+  }
+
+  return sendMessage(chatId, finalText, {
+    reply_markup: gameOverKeyboard()
+  });
+}
+
+// =========================
+// Actions
+// =========================
+function doStudy(player) {
+  if (player.education >= 6) {
+    player.lastEvent = "دیگه دکترا هم گرفتی، الان بیشتر از این فقط باید دانشگاه بزنی.";
+    return;
+  }
+
+  const cost = rand(400, 1200);
+
+  if (player.money < cost) {
+    player.lastEvent = `پول ادامه تحصیل نداشتی. دانشگاه هم گفت اول پول، بعد ژست علمی.`;
+    return;
+  }
+
+  player.money -= cost;
+  player.education += 1;
+  player.intelligence += rand(5, 10);
+  player.energy -= rand(4, 8);
+  player.happiness += rand(1, 5);
+
+  player.intelligence = clamp(player.intelligence, 0, 100);
+  player.energy = clamp(player.energy, 0, 100);
+  player.happiness = clamp(player.happiness, 0, 100);
+
+  player.lastEvent = `تحصیلت رو تا <b>${getEducationName(player.education)}</b> ادامه دادی. یه کم باکلاس‌تر شدی.`;
+}
+
+function doRest(player) {
+  player.energy = clamp(player.energy + rand(12, 25), 0, 100);
+  player.health = clamp(player.health + rand(4, 10), 0, 100);
+  player.happiness = clamp(player.happiness + rand(2, 7), 0, 100);
+  player.lastEvent = "استراحت کردی و برای مدتی از حالت جنازه فاصله گرفتی.";
+}
+
+function doFun(player) {
+  const cost = rand(100, 600);
+  if (player.money < cost) {
+    player.lastEvent = "خواستی تفریح کنی ولی جیبت گفت بشین سر جات.";
+    player.happiness -= 2;
+    player.happiness = clamp(player.happiness, 0, 100);
+    return;
+  }
+
+  player.money -= cost;
+  player.happiness = clamp(player.happiness + rand(8, 18), 0, 100);
+  player.energy = clamp(player.energy - rand(2, 8), 0, 100);
+  player.lastEvent = `رفتی تفریح و ${cost}$ دود شد، ولی حداقل بهت خوش گذشت.`;
+}
+
+function doMarry(player) {
+  if (player.married) {
+    player.lastEvent = "تو همین الانم متأهلی، دیگه شورشو درنیار.";
+    return;
+  }
+
+  if (player.age < 22) {
+    player.lastEvent = "هنوز برای ازدواج زیادی خامی. اول خودتو جمع کن.";
+    return;
+  }
+
+  if (player.money < 1500) {
+    player.lastEvent = "خواستی ازدواج کنی ولی هزینه‌ها بهت خندیدن.";
+    return;
+  }
+
+  if (chance(0.65)) {
+    player.married = true;
+    player.money -= rand(1000, 3000);
+    player.happiness = clamp(player.happiness + rand(10, 20), 0, 100);
+    player.lastEvent = "ازدواج کردی. از اینجا به بعد یا عاشقانه‌ست یا هزینه‌محور.";
+  } else {
+    player.happiness = clamp(player.happiness - rand(5, 12), 0, 100);
+    player.lastEvent = "جواب رد شنیدی. دنیا همون‌قدر بی‌رحمه که فکر می‌کردی.";
+  }
+}
+
+function doChild(player) {
+  if (!player.married) {
+    player.lastEvent = "اول باید ازدواج کنی، بعد وارد فاز بچه و بی‌خوابی بشی.";
+    return;
+  }
+
+  const cost = rand(500, 1500);
+  if (player.money < cost) {
+    player.lastEvent = "از نظر احساسی آماده بودی، از نظر مالی مضحک.";
+    return;
+  }
+
+  if (chance(0.7)) {
+    player.children += 1;
+    player.money -= cost;
+    player.happiness = clamp(player.happiness + rand(8, 16), 0, 100);
+    player.energy = clamp(player.energy - rand(5, 12), 0, 100);
+    player.lastEvent = `بچه‌دار شدی. مبارکه! حالا رسماً خواب باهات قهر می‌کنه.`;
+  } else {
+    player.lastEvent = "فعلاً بچه‌دار نشدی. شاید کائنات گفتن هنوز وقت فاجعه نیست.";
+  }
+}
+
+function doBuyHouse(player) {
+  if (player.house) {
+    player.lastEvent = "تو قبلاً خونه خریدی، مگه چندتا می‌خوای؟";
+    return;
+  }
+
+  const price = rand(8000, 15000);
+  if (player.money < price) {
+    player.lastEvent = `خواستی خونه بخری ولی ${price}$ کم داشتی، یعنی تقریباً هیچی نداشتی.`;
+    return;
+  }
+
+  player.house = true;
+  player.money -= price;
+  player.happiness = clamp(player.happiness + 15, 0, 100);
+  player.lastEvent = `خونه خریدی! ${price}$ پرید ولی حس بزرگسالی همزمان فعال شد.`;
+}
+
+function doBuyCar(player) {
+  if (player.car) {
+    player.lastEvent = "تو ماشین داری. دنبال کلکسیونری یا چی؟";
+    return;
+  }
+
+  const price = rand(3000, 8000);
+  if (player.money < price) {
+    player.lastEvent = `برای خرید ماشین ${price}$ لازم داشتی، ولی جیبت خندید و رد شد.`;
+    return;
+  }
+
+  player.car = true;
+  player.money -= price;
+  player.happiness = clamp(player.happiness + 8, 0, 100);
+  player.lastEvent = `ماشین خریدی. حالا می‌تونی تو ترافیک با پرستیژ بیشتری حرص بخوری.`;
+}
+
+function setJob(player, jobKey) {
+  if (jobKey === "worker") {
+    player.job = "worker";
+    player.lastEvent = "شغل کارگری رو گرفتی. زحمت زیاد، پول متوسط، کمر درد رایگان.";
+    return true;
+  }
+
+  if (jobKey === "artist") {
+    player.job = "artist";
+    player.lastEvent = "هنرمند شدی. یا می‌درخشی یا نون خالی می‌خوری، وسط ندارد.";
+    return true;
+  }
+
+  if (jobKey === "bartender") {
+    player.job = "bartender";
+    player.lastEvent = "ساقی شدی. درآمد بد نیست، ولی داستان و دردسر زیاده.";
+    return true;
+  }
+
+  if (jobKey === "doctor") {
+    if (!canBecomeDoctor(player)) {
+      player.lastEvent = "برای پزشک شدن هنوز نه درسش رو داری نه قیافه اعتمادبخشش رو.";
+      return false;
+    }
+    player.job = "doctor";
+    player.lastEvent = "پزشک شدی. تبریک، از این به بعد خسته ولی پولدارتر می‌شی.";
+    return true;
+  }
+
+  if (jobKey === "entrepreneur") {
+    if (!canBecomeEntrepreneur(player)) {
+      player.lastEvent = "برای کارآفرینی هنوز نه پولت می‌رسه نه مغزت کامل قانع‌کننده‌ست.";
+      return false;
+    }
+    player.job = "entrepreneur";
+    player.lastEvent = "کارآفرین شدی. یا می‌زنی می‌ترکونی یا می‌خوری زمین.";
+    return true;
+  }
+
+  return false;
+}
+
+// =========================
+// Routes
+// =========================
+app.get("/", (req, res) => {
+  res.status(200).send("✅ Life Simulator Bot is running");
 });
 
-app.get("/", (req, res) => { res.send("Life Game Bot is running!"); });
+app.get("/health", (req, res) => {
+  res.status(200).json({
+    ok: true,
+    service: "life-simulator-bot"
+  });
+});
 
-app.listen(PORT, () => { console.log(`Server running on port ${PORT}`); });
+app.post(`/webhook/${SECRET_PATH}`, async (req, res) => {
+  try {
+    console.log("📥 Incoming update:", JSON.stringify(req.body, null, 2));
+    const update = req.body;
+
+    // message
+    if (update.message) {
+      const msg = update.message;
+      const chatId = msg.chat.id;
+      const user = msg.from || {};
+      const text = msg.text || "";
+
+      if (text.startsWith("/start")) {
+        await showWelcome(chatId, user.first_name || "رفیق");
+      } else if (text.startsWith("/status")) {
+        const player = getPlayer(user);
+        await showMainMenu(chatId
