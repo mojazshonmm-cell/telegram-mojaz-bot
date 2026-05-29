@@ -2,60 +2,44 @@
 
 // --- Imports ---
 import express from 'express';
-import fetch from 'node-fetch'; // برای ارتباط با API تلگرام
-import bodyParser from 'body-parser'; // برای خواندن body درخواست‌ها
-import crypto from 'crypto'; // برای امنیت احتمالی (اگر لازم شود)
+import fetch from 'node-fetch'; // برای ارتباط با API تلگرام و سرویس‌های دیگر
+import bodyParser from 'body-parser'; // برای خواندن body درخواست‌های HTTP
+import crypto from 'crypto'; // برای امنیت احتمالی (در صورت نیاز)
 
 // --- Configuration ---
 const app = express();
-const PORT = process.env.PORT || 3000;
-const BOT_TOKEN = process.env.BOT_TOKEN; // توکن ربات از متغیرهای محیطی Railway
-const ADMIN_ID = '5576592239'; // آیدی ادمین که قبلا مشخص شده
-const WEBHOOK_PATH = '/webhook/mojaz0762'; // مسیر Webhook شما
+const PORT = process.env.PORT || 3000; // پورت مورد استفاده در Railway یا پورت پیش‌فرض
+const BOT_TOKEN = process.env.BOT_TOKEN; // توکن ربات تلگرام از متغیرهای محیطی Railway
+const ADMIN_ID = '5576592239'; // آیدی ادمین ربات
+const WEBHOOK_PATH = '/webhook/mojaz0762'; // مسیر Webhook برای دریافت آپدیت‌ها از تلگرام
+
+// --- Middleware ---
+// استفاده از body-parser برای پردازش JSON و URL-encoded data
+// اگر از express نسخه 4.16 به بالا استفاده می‌کنید، express.json() و express.urlencoded() کافی هستند
+// اما برای اطمینان و سازگاری با نسخه های قدیمی تر، از body-parser هم استفاده می کنیم.
+app.use(bodyParser.json());
+app.use(bodyParser.urlencoded({ extended: true }));
 
 // --- Data Storage (In-Memory) ---
-// برای سادگی، وضعیت کاربرها در حافظه RAM ذخیره می‌شود.
-// در صورت ری‌استارت ربات، این داده‌ها پاک می‌شوند.
-// برای ذخیره‌سازی دائمی، نیاز به دیتابیس (مثل PostgreSQL, MongoDB) است.
+// توجه: این داده‌ها با ری‌استارت ربات پاک می‌شوند. برای پایداری، نیاز به دیتابیس است.
 const usersData = new Map(); // Map<userId, userData>
-const businesses = new Map(); // Map<businessId, businessData> - اگر کسب‌وکارها دینامیک باشند
-const items = new Map(); // Map<itemId, itemData> - اگر آیتم‌ها دینامیک باشند
+const businesses = new Map(); // Map<businessId, businessData>
+const items = new Map(); // Map<itemId, itemData>
 
-// --- Helper Functions ---
+// --- Telegram API Helper Functions ---
 
-// دریافت اطلاعات کاربر (در صورت نبودن، ایجاد کاربر جدید)
-async function getUser(userId) {
-    if (!usersData.has(userId)) {
-        usersData.set(userId, {
-            id: userId,
-            money: 1000, // پول اولیه
-            xp: 0,
-            level: 1,
-            job: null,
-            education: null,
-            family: { married: false, spouse: null, children: [] },
-            house: null,
-            car: null,
-            business: null,
-            inventory: [],
-            lastActive: Date.now(),
-            health: 100, // سلامتی
-            energy: 100, // انرژی
-            skills: {}, // مهارت‌ها
-        });
-    }
-    // آپدیت زمان آخرین فعالیت
-    usersData.get(userId).lastActive = Date.now();
-    return usersData.get(userId);
-}
-
-// ذخیره اطلاعات کاربر
-function saveUser(userData) {
-    usersData.set(userData.id, userData);
-}
-
-// ارسال پیام به کاربر
+/**
+ * ارسال پیام متنی به یک چت ID مشخص.
+ * @param {string | number} chatId - آیدی چت تلگرام.
+ * @param {string} text - متن پیام.
+ * @param {object} options - گزینه‌های اضافی مانند reply_markup.
+ * @returns {Promise<object | null>} - نتیجه پاسخ API تلگرام یا null در صورت خطا.
+ */
 async function sendMessage(chatId, text, options = {}) {
+    if (!BOT_TOKEN) {
+        console.error("BOT_TOKEN is not defined. Cannot send messages.");
+        return null;
+    }
     const url = `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`;
     try {
         const response = await fetch(url, {
@@ -64,16 +48,18 @@ async function sendMessage(chatId, text, options = {}) {
             body: JSON.stringify({
                 chat_id: chatId,
                 text: text,
-                parse_mode: 'HTML', // برای استفاده از تگ‌های HTML در پیام
+                parse_mode: 'HTML', // پشتیبانی از تگ‌های HTML در پیام
                 ...options,
             }),
         });
         const result = await response.json();
         if (!result.ok) {
-            console.error(`Error sending message to ${chatId}: ${result.description}`);
-            // اگر پیام ادمین بود و ارور داد، شاید مشکل توکن است
-            if (chatId.toString() === ADMIN_ID) {
-                console.error("Admin message failed. Check BOT_TOKEN and webhook setup.");
+            console.error(`Error sending message to ${chatId}: ${result.description} (Error Code: ${result.error_code})`);
+            // اگر پیام به ادمین ارسال نشده، ممکن است توکن یا تنظیمات webhook مشکل داشته باشد
+            if (String(chatId) === ADMIN_ID && result.error_code === 401) {
+                 console.error("Admin message failed. Check BOT_TOKEN. It might be invalid.");
+            } else if (String(chatId) === ADMIN_ID && result.error_code === 400) {
+                 console.error("Admin message failed. Check webhook path or bot configuration.");
             }
         }
         return result;
@@ -83,8 +69,19 @@ async function sendMessage(chatId, text, options = {}) {
     }
 }
 
-// ارسال عکس به کاربر
+/**
+ * ارسال عکس به یک چت ID مشخص.
+ * @param {string | number} chatId - آیدی چت تلگرام.
+ * @param {string} photoUrl - URL عکس یا file_id.
+ * @param {string} caption - کپشن عکس.
+ * @param {object} options - گزینه‌های اضافی.
+ * @returns {Promise<object | null>} - نتیجه پاسخ API تلگرام یا null در صورت خطا.
+ */
 async function sendPhoto(chatId, photoUrl, caption = '', options = {}) {
+     if (!BOT_TOKEN) {
+        console.error("BOT_TOKEN is not defined. Cannot send photos.");
+        return null;
+    }
     const url = `https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`;
     try {
         const response = await fetch(url, {
@@ -92,7 +89,7 @@ async function sendPhoto(chatId, photoUrl, caption = '', options = {}) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 chat_id: chatId,
-                photo: photoUrl, // می‌تواند URL عکس باشد
+                photo: photoUrl,
                 caption: caption,
                 parse_mode: 'HTML',
                 ...options,
@@ -100,7 +97,7 @@ async function sendPhoto(chatId, photoUrl, caption = '', options = {}) {
         });
         const result = await response.json();
         if (!result.ok) {
-            console.error(`Error sending photo to ${chatId}: ${result.description}`);
+            console.error(`Error sending photo to ${chatId}: ${result.description} (Error Code: ${result.error_code})`);
         }
         return result;
     } catch (error) {
@@ -109,41 +106,18 @@ async function sendPhoto(chatId, photoUrl, caption = '', options = {}) {
     }
 }
 
-// افزایش XP و Level کاربر
-function addXP(userId, amount) {
-    const user = usersData.get(userId);
-    if (!user) return;
+// --- Game Data and Helpers ---
 
-    user.xp += amount;
-    let xpToNextLevel = calculateXPForLevel(user.level);
-
-    while (user.xp >= xpToNextLevel) {
-        user.level++;
-        user.xp -= xpToNextLevel;
-        xpToNextLevel = calculateXPForLevel(user.level);
-        sendMessage(userId, `🎉 تبریک! شما به لول ${user.level} رسیدید! XP مورد نیاز برای لول بعد: ${xpToNextLevel}`);
-    }
-    saveUser(user);
-}
-
-// محاسبه XP مورد نیاز برای رسیدن به لول بعدی
-function calculateXPForLevel(level) {
-    // یک فرمول ساده برای رشد XP: level^2 * 100
-    return Math.pow(level, 2) * 100;
-}
-
-// --- Core Game Logic Functions ---
-
-// شغل‌ها (می‌تواند از یک فایل جداگانه خوانده شود)
+// داده‌های ثابت بازی (شغل‌ها، تحصیلات، خانه‌ها، ماشین‌ها)
+// این داده‌ها می‌توانند از فایل‌های JSON جداگانه بارگذاری شوند.
 const jobs = {
-    'unemployed': { name: 'بیکار', salary: 0, xp: 0, description: 'در جستجوی شغل...' },
-    'waiter': { name: 'پیش‌خدمت', salary: 50, xp: 10, description: 'سرو غذا و نوشیدنی در رستوران.' },
-    'programmer': { name: 'برنامه‌نویس', salary: 200, xp: 30, description: 'کدنویسی و توسعه نرم‌افزار.' },
-    'doctor': { name: 'پزشک', salary: 400, xp: 60, description: 'درمان بیماران و ارائه خدمات پزشکی.' },
-    'ceo': { name: 'مدیرعامل', salary: 1000, xp: 150, description: 'مدیریت شرکت و تصمیم‌گیری‌های استراتژیک.' },
+    'unemployed': { name: 'بیکار', salary: 0, xp: 0, cost: 0, description: 'در جستجوی شغل...' },
+    'waiter': { name: 'پیش‌خدمت', salary: 50, xp: 10, cost: 100, description: 'سرو غذا و نوشیدنی در رستوران.' },
+    'programmer': { name: 'برنامه‌نویس', salary: 200, xp: 30, cost: 500, description: 'کدنویسی و توسعه نرم‌افزار.' },
+    'doctor': { name: 'پزشک', salary: 400, xp: 60, cost: 2000, description: 'درمان بیماران و ارائه خدمات پزشکی.' },
+    'ceo': { name: 'مدیرعامل', salary: 1000, xp: 150, cost: 10000, description: 'مدیریت شرکت و تصمیم‌گیری‌های استراتژیک.' },
 };
 
-// تحصیلات
 const educations = {
     'none': { name: 'بدون تحصیلات', cost: 0, xp_gain: 0 },
     'high_school': { name: 'دیپلم', cost: 500, xp_gain: 50 },
@@ -152,14 +126,12 @@ const educations = {
     'phd': { name: 'دکترا', cost: 10000, xp_gain: 600 },
 };
 
-// خانه‌ها
 const houses = {
     'apartment': { name: 'آپارتمان کوچک', price: 5000, rent: 50, description: 'یک شروع ساده.' },
     'house': { name: 'خانه متوسط', price: 20000, rent: 200, description: 'فضای کافی برای زندگی.' },
     'mansion': { name: 'عمارت لوکس', price: 100000, rent: 1000, description: 'زندگی در نهایت تجمل.' },
 };
 
-// ماشین‌ها
 const cars = {
     'bicycle': { name: 'دوچرخه', price: 100, description: 'برای مسافت‌های کوتاه.' },
     'sedan': { name: 'سدان معمولی', price: 5000, description: 'یک ماشین کاربردی.' },
@@ -167,12 +139,88 @@ const cars = {
     'sports_car': { name: 'خودروی اسپرت', price: 50000, description: 'سرعت و هیجان.' },
 };
 
-// کسب‌وکارها (مثال)
-// businesses.set('restuarant', { id: 'restuarant', name: 'رستوران', price: 50000, income: 500, workers: 5, upkeep: 200 });
+// ----- Helper Functions -----
 
-// آیتم‌ها (مثال)
-// items.set('food_pack', { id: 'food_pack', name: 'بسته غذایی', effect: { health: 10, energy: 20 } });
+/**
+ * دریافت اطلاعات کاربر. اگر کاربر وجود نداشته باشد، یک پروفایل جدید ایجاد می‌کند.
+ * @param {string | number} userId - آیدی کاربر تلگرام.
+ * @returns {Promise<object>} - شیء حاوی اطلاعات کاربر.
+ */
+async function getUser(userId) {
+    if (!usersData.has(userId)) {
+        console.log(`Creating new user profile for: ${userId}`);
+        usersData.set(userId, {
+            id: String(userId), // اطمینان از اینکه همیشه استرینگ است
+            money: 1000,
+            xp: 0,
+            level: 1,
+            job: 'unemployed', // شغل پیش‌فرض
+            education: 'none', // تحصیلات پیش‌فرض
+            family: { married: false, spouse: null, children: [] },
+            house: null,
+            car: null,
+            business: null,
+            inventory: [],
+            lastActive: Date.now(),
+            health: 100,
+            energy: 100,
+            skills: {},
+            lastDailyReward: 0, // برای پاداش روزانه
+        });
+    }
+    // آپدیت زمان آخرین فعالیت و اطمینان از وجود مقدار اولیه برای پاداش روزانه
+    const user = usersData.get(userId);
+    user.lastActive = Date.now();
+    if (user.lastDailyReward === undefined) {
+        user.lastDailyReward = 0;
+    }
+    saveUser(user); // ذخیره مجدد برای اطمینان از آپدیت lastActive
+    return user;
+}
 
+/**
+ * ذخیره اطلاعات کاربر در Map.
+ * @param {object} userData - شیء اطلاعات کاربر.
+ */
+function saveUser(userData) {
+    usersData.set(userData.id, userData);
+}
+
+/**
+ * افزایش XP کاربر و بررسی ارتقاء سطح.
+ * @param {string} userId - آیدی کاربر.
+ * @param {number} amount - مقدار XP برای اضافه کردن.
+ */
+function addXP(userId, amount) {
+    const user = usersData.get(userId);
+    if (!user || amount <= 0) return;
+
+    user.xp += amount;
+    let xpToNextLevel = calculateXPForLevel(user.level);
+
+    while (user.xp >= xpToNextLevel) {
+        user.level++;
+        user.xp -= xpToNextLevel; // کم کردن XP که برای سطح فعلی استفاده شده
+        xpToNextLevel = calculateXPForLevel(user.level);
+        sendMessage(userId, `🎉 تبریک! شما به لول ${user.level} رسیدید! XP مورد نیاز برای لول بعد: ${xpToNextLevel}`);
+    }
+    saveUser(user);
+}
+
+/**
+ * محاسبه XP مورد نیاز برای رسیدن به لول بعدی.
+ * @param {number} level - سطح فعلی کاربر.
+ * @returns {number} - مقدار XP لازم برای رسیدن به سطح بعدی.
+ */
+function calculateXPForLevel(level) {
+    // فرمول: level^2 * 100 + 50 (برای شروع کمی آسان‌تر)
+    return Math.pow(level, 2) * 100 + 50;
+}
+
+/**
+ * نمایش وضعیت فعلی کاربر به همراه دکمه‌های اینلاین.
+ * @param {string | number} userId - آیدی کاربر.
+ */
 async function displayStatus(userId) {
     const user = await getUser(userId);
     let message = `<b>📊 وضعیت شما (${user.id})</b>\n\n`;
@@ -197,7 +245,7 @@ async function displayStatus(userId) {
     // خانواده
     if (user.family.married) {
         message += `<b>💍 وضعیت تاهل:</b> متاهل (همسر: ${user.family.spouse || 'نامشخص'})`;
-        if (user.family.children.length > 0) {
+        if (user.family.children && user.family.children.length > 0) {
             message += ` | <b>فرزندان:</b> ${user.family.children.length} نفر`;
         }
         message += '\n';
@@ -207,18 +255,20 @@ async function displayStatus(userId) {
 
     // کسب‌وکار (اگر داشته باشد)
     if (user.business) {
-        const businessData = businesses.get(user.business); // فرض می‌کنیم کسب‌وکار در 'businesses' ذخیره شده
+        const businessData = businesses.get(user.business);
         if (businessData) {
             message += `<b>🏢 کسب‌وکار:</b> ${businessData.name} (درآمد روزانه: ${businessData.income} تومان)\n`;
         }
     }
 
     // موجودی (چند آیتم اول)
-    if (user.inventory.length > 0) {
-        message += `<b>🎒 موجودی:</b> ${user.inventory.slice(0, 3).map(itemId => items.get(itemId)?.name || 'نامشخص').join(', ')}${user.inventory.length > 3 ? '...' : ''}\n`;
+    if (user.inventory && user.inventory.length > 0) {
+        // فرض می‌کنیم آیتم‌ها در Map items ذخیره شده‌اند
+        const itemNames = user.inventory.slice(0, 3).map(itemId => items.get(itemId)?.name || 'نامشخص');
+        message += `<b>🎒 موجودی:</b> ${itemNames.join(', ')}${user.inventory.length > 3 ? '...' : ''}\n`;
     }
 
-    // دکمه‌های کیبورد
+    // تعریف دکمه‌های کیبورد اینلاین
     const keyboard = {
         inline_keyboard: [
             [{ text: 'وضعیت 📊', callback_data: 'status' }],
@@ -237,14 +287,22 @@ async function displayStatus(userId) {
 
 // --- Command Handlers ---
 
+/**
+ * مدیریت دستور /start.
+ * @param {object} msg - آبجکت پیام تلگرام.
+ */
 async function handleStartCommand(msg) {
     const userId = msg.from.id;
     const chatId = msg.chat.id;
     await getUser(userId); // اطمینان از وجود کاربر
-    await sendMessage(chatId, `به شبیه‌ساز زندگی خوش آمدید، ${msg.from.first_name}! با دستور /help می‌توانید منو را ببینید.`);
+    await sendMessage(chatId, `به شبیه‌ساز زندگی خوش آمدید، ${msg.from.first_name}! برای شروع و دیدن منو، دستور /help را وارد کنید.`);
     await displayStatus(userId); // نمایش وضعیت اولیه
 }
 
+/**
+ * مدیریت دستور /help.
+ * @param {object} msg - آبجکت پیام تلگرام.
+ */
 async function handleHelpCommand(msg) {
     const userId = msg.from.id;
     const chatId = msg.chat.id;
@@ -266,7 +324,7 @@ async function handleHelpCommand(msg) {
     helpMessage += `🏃‍♂️ <b>فعالیت‌ها:</b> کارهای روزمره مثل ورزش، تفریح\n`;
 
     // دستورات ادمین (فقط اگر کاربر ادمین باشد)
-    if (userId.toString() === ADMIN_ID) {
+    if (String(userId) === ADMIN_ID) {
         helpMessage += `\n<b>🔑 دستورات ادمین:</b>\n`;
         helpMessage += `/setmoney [USER_ID] [AMOUNT] - تعیین پول کاربر\n`;
         helpMessage += `/addmoney [USER_ID] [AMOUNT] - اضافه کردن پول به کاربر\n`;
@@ -277,13 +335,22 @@ async function handleHelpCommand(msg) {
     await sendMessage(chatId, helpMessage);
 }
 
+/**
+ * مدیریت دستور /status.
+ * @param {object} msg - آبجکت پیام تلگرام.
+ */
 async function handleStatusCommand(msg) {
     const userId = msg.from.id;
     await displayStatus(userId);
 }
 
+/**
+ * مدیریت دستور /daily برای دریافت پاداش روزانه.
+ * @param {object} msg - آبجکت پیام تلگرام.
+ */
 async function handleDailyCommand(msg) {
     const userId = msg.from.id;
+    const chatId = msg.chat.id;
     const user = await getUser(userId);
     const now = Date.now();
     const dayInMillis = 24 * 60 * 60 * 1000;
@@ -293,23 +360,23 @@ async function handleDailyCommand(msg) {
         const remainingTime = dayInMillis - (now - user.lastDailyReward);
         const remainingHours = Math.floor(remainingTime / (60 * 60 * 1000));
         const remainingMinutes = Math.floor((remainingTime % (60 * 60 * 1000)) / (60 * 1000));
-        await sendMessage(msg.chat.id, `هنوز ${remainingHours} ساعت و ${remainingMinutes} دقیقه دیگر تا پاداش روزانه بعدی مانده است.`);
+        await sendMessage(chatId, `هنوز ${remainingHours} ساعت و ${remainingMinutes} دقیقه دیگر تا پاداش روزانه بعدی مانده است.`);
         return;
     }
 
-    const dailyBonus = 100; // مقدار پاداش روزانه
-    const dailyXp = 5;
-    user.money += dailyBonus;
+    const dailyBonusMoney = 100; // مقدار پاداش نقدی روزانه
+    const dailyBonusXP = 5;    // مقدار پاداش XP روزانه
+    user.money += dailyBonusMoney;
     user.lastDailyReward = now; // ثبت زمان دریافت پاداش
-    addXP(userId, dailyXp); // اضافه کردن XP
+    addXP(userId, dailyBonusXP); // اضافه کردن XP
     saveUser(user);
-    await sendMessage(msg.chat.id, `🎁 پاداش روزانه شما ${dailyBonus.toLocaleString()} تومان و ${dailyXp} XP دریافت شد!`);
-    await displayStatus(userId);
+    await sendMessage(chatId, `🎁 پاداش روزانه شما ${dailyBonusMoney.toLocaleString()} تومان و ${dailyBonusXP} XP دریافت شد!`);
+    await displayStatus(userId); // نمایش وضعیت به‌روز شده
 }
 
-// --- Admin Commands ---
+// --- Admin Command Handlers ---
 async function handleSetMoneyCommand(msg) {
-    if (msg.chat.id.toString() !== ADMIN_ID || msg.chat.type !== 'private') {
+    if (String(msg.chat.id) !== ADMIN_ID || msg.chat.type !== 'private') {
         await sendMessage(msg.chat.id, "این دستور فقط برای ادمین در چت خصوصی قابل استفاده است.");
         return;
     }
@@ -321,8 +388,8 @@ async function handleSetMoneyCommand(msg) {
     const userIdToSet = parts[1];
     const amount = parseInt(parts[2], 10);
 
-    if (isNaN(amount)) {
-        await sendMessage(msg.chat.id, "مقدار پول باید عدد باشد.");
+    if (isNaN(amount) || amount < 0) {
+        await sendMessage(msg.chat.id, "مقدار پول باید یک عدد نامنفی باشد.");
         return;
     }
 
@@ -335,11 +402,11 @@ async function handleSetMoneyCommand(msg) {
     user.money = amount;
     saveUser(user);
     await sendMessage(msg.chat.id, `پول کاربر ${userIdToSet} به ${amount.toLocaleString()} تومان تنظیم شد.`);
-    await sendMessage(userIdToSet, `پول شما توسط ادمین به ${amount.toLocaleString()} تومان تغییر یافت.`);
+    await sendMessage(userIdToSet, `مقدار پول شما توسط ادمین به ${amount.toLocaleString()} تومان تغییر یافت.`);
 }
 
 async function handleAddMoneyCommand(msg) {
-    if (msg.chat.id.toString() !== ADMIN_ID || msg.chat.type !== 'private') {
+    if (String(msg.chat.id) !== ADMIN_ID || msg.chat.type !== 'private') {
         await sendMessage(msg.chat.id, "این دستور فقط برای ادمین در چت خصوصی قابل استفاده است.");
         return;
     }
@@ -351,8 +418,8 @@ async function handleAddMoneyCommand(msg) {
     const userIdToAdd = parts[1];
     const amount = parseInt(parts[2], 10);
 
-    if (isNaN(amount)) {
-        await sendMessage(msg.chat.id, "مقدار پول باید عدد باشد.");
+    if (isNaN(amount) || amount <= 0) {
+        await sendMessage(msg.chat.id, "مقدار پول باید یک عدد مثبت باشد.");
         return;
     }
 
@@ -369,7 +436,7 @@ async function handleAddMoneyCommand(msg) {
 }
 
 async function handleResetUserCommand(msg) {
-    if (msg.chat.id.toString() !== ADMIN_ID || msg.chat.type !== 'private') {
+    if (String(msg.chat.id) !== ADMIN_ID || msg.chat.type !== 'private') {
         await sendMessage(msg.chat.id, "این دستور فقط برای ادمین در چت خصوصی قابل استفاده است.");
         return;
     }
@@ -382,12 +449,13 @@ async function handleResetUserCommand(msg) {
 
     if (usersData.has(userIdToReset)) {
         usersData.delete(userIdToReset);
+        console.log(`User data reset for: ${userIdToReset}`);
         await sendMessage(msg.chat.id, `اطلاعات کاربر ${userIdToReset} با موفقیت پاک شد.`);
-        // سعی کن به کاربر اطلاع بدهی (اگر ممکن بود)
+        // تلاش برای اطلاع‌رسانی به کاربر، در صورت بلاک نبودن ربات
         try {
             await sendMessage(userIdToReset, "اطلاعات حساب شما توسط ادمین ریست شد. لطفاً ربات را دوباره با /start شروع کنید.");
         } catch (e) {
-            console.log(`User ${userIdToReset} not found or blocked bot.`);
+            console.log(`Could not notify user ${userIdToReset}: Bot might be blocked or user not found.`);
         }
     } else {
         await sendMessage(msg.chat.id, `کاربر با آیدی ${userIdToReset} یافت نشد.`);
@@ -395,7 +463,7 @@ async function handleResetUserCommand(msg) {
 }
 
 async function handleAdminHelpCommand(msg) {
-     if (msg.chat.id.toString() === ADMIN_ID && msg.chat.type === 'private') {
+     if (String(msg.chat.id) === ADMIN_ID && msg.chat.type === 'private') {
          await handleHelpCommand(msg); // فقط نمایش راهنمای کلی
      } else {
          await sendMessage(msg.chat.id, "این دستور فقط برای ادمین در چت خصوصی قابل استفاده است.");
@@ -405,16 +473,24 @@ async function handleAdminHelpCommand(msg) {
 
 // --- Inline Keyboard Callbacks ---
 
+/**
+ * مدیریت کلیک روی دکمه‌های اینلاین کیبورد.
+ * @param {object} query - آبجکت callback_query تلگرام.
+ */
 async function handleCallbackQuery(query) {
     const userId = query.from.id;
     const chatId = query.message.chat.id;
     const data = query.data;
     const messageId = query.message.message_id;
 
-    // حذف دکمه‌ها پس از کلیک (اختیاری)
-    // await deleteMessage(chatId, messageId);
+    // پاسخ به callback query برای حذف دایره بارگذاری روی دکمه
+    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ callback_query_id: query.id })
+    });
 
-    const user = await getUser(userId);
+    const user = await getUser(userId); // اطمینان از وجود کاربر
 
     switch (data) {
         case 'status':
@@ -425,7 +501,7 @@ async function handleCallbackQuery(query) {
             let jobMessage = `<b>💼 منوی شغل</b>\n\n`;
             jobMessage += `شغل فعلی شما: <b>${(jobs[user.job] || jobs['unemployed']).name}</b>\n`;
             if (user.job && user.job !== 'unemployed') {
-                jobMessage += `حقوق روزانه: ${jobs[user.job].salary} تومان | XP: ${jobs[user.job].xp}\n\n`;
+                jobMessage += `حقوق روزانه: ${jobs[user.job].salary.toLocaleString()} تومان | XP: ${jobs[user.job].xp}\n\n`;
             }
             jobMessage += `<b>گزینه‌ها:</b>\n`;
             jobMessage += `- /findjob - جستجو برای شغل جدید\n`;
@@ -437,15 +513,16 @@ async function handleCallbackQuery(query) {
         case 'education_menu':
             let eduMessage = `<b>🎓 منوی تحصیلات</b>\n\n`;
             eduMessage += `سطح تحصیلات فعلی: <b>${(educations[user.education] || educations['none']).name}</b>\n`;
-            eduMessage += `هزینه: ${user.money} | XP: ${user.xp}\n\n`;
-            eduMessage += `<b>گزینه‌ها:</b>\n`;
+            eduMessage += `موجودی شما: ${user.money.toLocaleString()} تومان\n\n`;
+            eduMessage += `<b>گزینه‌های ارتقاء:</b>\n`;
             for (const [key, edu] of Object.entries(educations)) {
-                if (key === 'none') continue;
-                if (user.education && educations[user.education].xp_gain >= edu.xp_gain) continue; // اگر سطح بالاتری دارد، نشان نده
+                if (key === 'none') continue; // بدون تحصیلات، قابل ارتقا نیست
+                // اگر کاربر قبلا سطح بالاتری دارد، این گزینه را نشان نده
+                if (user.education && educations[user.education].xp_gain >= edu.xp_gain) continue;
 
                 const canAfford = user.money >= edu.cost;
-                const buttonText = `${edu.name} (هزینه: ${edu.cost.toLocaleString()} | XP: ${edu.xp_gain}) ${canAfford ? '✅' : '❌'}`;
-                eduMessage += `- /study ${key} - ${buttonText}\n`;
+                const buttonText = `${edu.name} (هزینه: ${edu.cost.toLocaleString()} | XP: ${edu.xp_gain})`;
+                eduMessage += `- /study ${key} - ${buttonText} ${canAfford ? '✅' : '❌'}\n`;
             }
             await sendMessage(chatId, eduMessage);
             break;
@@ -472,12 +549,12 @@ async function handleCallbackQuery(query) {
              let marriageMessage = `<b>💍 منوی ازدواج و خانواده</b>\n\n`;
             if (user.family.married) {
                 marriageMessage += `شما متاهل هستید و همسر شما ${user.family.spouse} است.\n`;
-                marriageMessage += `شما ${user.family.children.length} فرزند دارید.\n`;
+                marriageMessage += `شما ${user.family.children ? user.family.children.length : 0} فرزند دارید.\n`;
                 marriageMessage += `- /divorce - درخواست طلاق\n`;
             } else {
                 marriageMessage += `شما مجرد هستید.\n`;
-                marriageMessage += `- /propose [USER_ID] - پیشنهاد ازدواج به کاربر دیگر\n`;
-                marriageMessage += `- /search_partner - جستجو برای همسر (قابلیت پیشرفته)\n`;
+                marriageMessage += `- /propose [USER_ID] - پیشنهاد ازدواج به کاربر دیگر (نیاز به تایید طرف مقابل)\n`;
+                // marriageMessage += `- /search_partner - جستجو برای همسر (قابلیت پیشرفته)\n`; // فعلا پیاده‌سازی نشده
             }
             await sendMessage(chatId, marriageMessage);
             break;
@@ -496,7 +573,8 @@ async function handleCallbackQuery(query) {
                 }
             } else {
                 businessMessage += `شما هیچ کسب‌وکاری ندارید.\n`;
-                businessMessage += `- /startbusiness [ID] - راه‌اندازی کسب‌وکار (لیست کسب‌وکارهای قابل راه‌اندازی: رستوران، فروشگاه، ...)\n`;
+                businessMessage += `- /startbusiness [ID] - راه‌اندازی کسب‌وکار (مثال: /startbusiness restaurant)\n`;
+                businessMessage += `کسب‌وکارهای موجود: رستوران (restaurant)، فروشگاه (store)، ...\n`; // لیست کسب‌وکارهای قابل راه‌اندازی
             }
              await sendMessage(chatId, businessMessage);
             break;
@@ -504,63 +582,62 @@ async function handleCallbackQuery(query) {
         case 'activities_menu':
              let activityMessage = `<b>🏃‍♂️ منوی فعالیت‌ها</b>\n\n`;
              activityMessage += `انرژی فعلی: ${user.energy}/100 | سلامتی: ${user.health}/100\n`;
-             activityMessage += `- /exercise - ورزش (افزایش انرژی، کاهش سلامتی)\n`;
+             activityMessage += `- /exercise - ورزش (مصرف انرژی، افزایش مهارت)\n`;
              activityMessage += `- /relax - استراحت (افزایش انرژی و سلامتی)\n`;
-             activityMessage += `- /eat [ITEM_ID] - خوردن آیتم از موجودی\n`;
-             activityMessage += `- /crime - انجام جرم (ریسک بالا، پاداش بالا)\n`;
+             activityMessage += `- /eat [ITEM_ID] - خوردن آیتم از موجودی (مثلا: /eat food_pack)\n`;
+             activityMessage += `- /crime - انجام جرم (ریسک بالا، پاداش بالا)\n`; // پیاده‌سازی نشده
              await sendMessage(chatId, activityMessage);
             break;
 
         case 'help':
+            // ارسال پیام راهنما با استفاده از هندلر مربوطه
             await handleHelpCommand({ from: query.from, chat: query.message.chat });
             break;
 
         default:
-            // اگر داده ناشناس بود، فقط پیام را پاک کن یا پیغام خطا بده
             await sendMessage(chatId, "گزینه نامعتبر.");
             break;
     }
-     // پس از پردازش callback، آن را تأیید کن تا دایره بارگذاری روی دکمه حذف شود.
-     // بدون این، دکمه برای همیشه در حالت "فشرده" باقی می‌ماند.
-    fetch(`https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ callback_query_id: query.id })
-    });
 }
 
 
-// --- Main Message Handler ---
+// --- Message Routing ---
+
+/**
+ * مدیریت تمام پیام‌های دریافتی از کاربران.
+ * @param {object} msg - آبجکت پیام تلگرام.
+ */
 async function handleMessage(msg) {
     const userId = msg.from.id;
     const chatId = msg.chat.id;
     const chatType = msg.chat.type; // 'private', 'group', 'supergroup', 'channel'
     const messageText = msg.text;
 
-    // اطمینان از لود شدن کاربر
+    // اگر پیام متن نداشت (مثلا عکس یا استیکر) فعلا نادیده گرفته می‌شود
+    if (!messageText) return;
+
+    // اطمینان از وجود کاربر
     await getUser(userId);
 
     // --- Admin Commands Handling ---
-    if (userId.toString() === ADMIN_ID && chatType === 'private') {
+    // بررسی اینکه آیا کاربر، ادمین است و در چت خصوصی است
+    if (String(userId) === ADMIN_ID && chatType === 'private') {
         if (messageText.startsWith('/setmoney')) {
-            await handleSetMoneyCommand(msg);
-            return;
+            await handleSetMoneyCommand(msg); return;
         }
         if (messageText.startsWith('/addmoney')) {
-            await handleAddMoneyCommand(msg);
-            return;
+            await handleAddMoneyCommand(msg); return;
         }
         if (messageText.startsWith('/resetuser')) {
-            await handleResetUserCommand(msg);
-            return;
+            await handleResetUserCommand(msg); return;
         }
         if (messageText === '/adminhelp') {
-            await handleAdminHelpCommand(msg);
-            return;
+            await handleAdminHelpCommand(msg); return;
         }
     }
 
     // --- Regular User Commands ---
+    // اولویت با دستورات خاص است
     if (messageText.startsWith('/start')) {
         await handleStartCommand(msg);
     } else if (messageText.startsWith('/help')) {
@@ -572,133 +649,36 @@ async function handleMessage(msg) {
     }
     // --- Job Commands ---
     else if (messageText.startsWith('/findjob')) {
-        // منطق پیدا کردن شغل جدید
-        const user = usersData.get(userId);
-        const availableJobs = Object.keys(jobs).filter(key => key !== 'unemployed'); // شغل‌هایی که می‌توان گرفت
+        const user = await getUser(userId);
+        const availableJobs = Object.keys(jobs).filter(key => key !== 'unemployed');
+        // انتخاب یک شغل تصادفی از بین شغل‌های قابل گرفتن
         const randomIndex = Math.floor(Math.random() * availableJobs.length);
         const newJobKey = availableJobs[randomIndex];
         const newJob = jobs[newJobKey];
 
-        if (user.money < newJob.cost) { // اگر برای شغل هزینه لازم است
-             await sendMessage(chatId, `برای گرفتن شغل ${newJob.name} به ${newJob.cost} تومان نیاز دارید.`);
-             return;
+        // اگر کاربر در حال حاضر بیکار است و پول کافی دارد
+        if (user.job === 'unemployed' && user.money >= newJob.cost) {
+            user.money -= newJob.cost;
+            user.job = newJobKey;
+            addXP(userId, newJob.xp); // اضافه کردن XP اولیه شغل
+            saveUser(user);
+            await sendMessage(chatId, `شما به عنوان ${newJob.name} استخدام شدید! ${newJob.description}`);
+            await displayStatus(userId);
+        } else if (user.job !== 'unemployed') {
+            await sendMessage(chatId, `شما در حال حاضر ${jobs[user.job].name} هستید. برای تغییر شغل، ابتدا شغل فعلی را ترک کنید (/quitjob).`);
+        } else {
+            await sendMessage(chatId, `برای گرفتن شغل ${newJob.name} به ${newJob.cost.toLocaleString()} تومان نیاز دارید.`);
         }
-
-        if (user.job && user.job !== 'unemployed') {
-            // اگر شغل دارد، اول باید ترک کند یا هزینه‌ای بدهد
-             await sendMessage(chatId, `شما در حال حاضر ${jobs[user.job].name} هستید. برای تغییر شغل، ابتدا شغل قبلی را ترک کنید (/quitjob).`);
-             return;
-        }
-
-        user.job = newJobKey;
-        user.money -= newJob.cost || 0; // کم کردن هزینه شغل اگر دارد
-        addXP(userId, newJob.xp);
-        saveUser(user);
-        await sendMessage(chatId, `شما به عنوان ${newJob.name} استخدام شدید! ${newJob.description}`);
-        await displayStatus(userId);
     } else if (messageText.startsWith('/work')) {
-        const user = usersData.get(userId);
+        const user = await getUser(userId);
         if (!user.job || user.job === 'unemployed') {
             await sendMessage(chatId, "شما شغلی ندارید. ابتدا با /findjob یک شغل پیدا کنید.");
             return;
         }
         if (user.energy < 20) {
-            await sendMessage(chatId, "انرژی شما کافی نیست. لطفاً استراحت کنید.");
+            await sendMessage(chatId, "انرژی شما کافی نیست. لطفاً استراحت کنید (/relax).");
             return;
         }
 
         const job = jobs[user.job];
-        const salaryEarned = job.salary + Math.floor(Math.random() * 50); // مقداری تصادفی
-        const xpGained = job.xp + Math.floor(Math.random() * 10);
-        user.money += salaryEarned;
-        user.energy -= 20; // مصرف انرژی
-        addXP(userId, xpGained);
-        saveUser(user);
-        await sendMessage(chatId, `شما ${salaryEarned} تومان درآمد کسب کردید و ${xpGained} XP گرفتید. انرژی شما کم شد.`);
-        await displayStatus(userId);
-    } else if (messageText.startsWith('/quitjob')) {
-        const user = usersData.get(userId);
-        if (!user.job || user.job === 'unemployed') {
-            await sendMessage(chatId, "شما شغلی ندارید که ترک کنید.");
-            return;
-        }
-        const jobName = jobs[user.job].name;
-        user.job = 'unemployed';
-        saveUser(user);
-        await sendMessage(chatId, `شما شغل ${jobName} را ترک کردید.`);
-        await displayStatus(userId);
-    }
-    // --- Education Commands ---
-    else if (messageText.startsWith('/study')) {
-        const parts = messageText.split(' ');
-        if (parts.length === 2) {
-            const eduKey = parts[1];
-            const edu = educations[eduKey];
-            if (edu) {
-                if (user.money >= edu.cost) {
-                    if (user.education && educations[user.education].xp_gain >= edu.xp_gain) {
-                         await sendMessage(chatId, `شما سطح تحصیلات بالاتری دارید.`);
-                         return;
-                    }
-                    user.money -= edu.cost;
-                    addXP(userId, edu.xp_gain);
-                    user.education = eduKey;
-                    saveUser(user);
-                    await sendMessage(chatId, `شما ${edu.name} را با موفقیت گذراندید!`);
-                    await displayStatus(userId);
-                } else {
-                    await sendMessage(chatId, `برای ${edu.name} به ${edu.cost.toLocaleString()} تومان نیاز دارید.`);
-                }
-            } else {
-                await sendMessage(chatId, "سطح تحصیلات نامعتبر است.");
-            }
-        } else {
-            await sendMessage(chatId, "فرمت دستور اشتباه است. از /study [KEY] استفاده کنید. (مثلا: /study university)");
-        }
-    }
-    // --- Shop Commands ---
-     else if (messageText.startsWith('/buy')) {
-        const parts = messageText.split(' ');
-        // /buy house apartment
-        // /buy car sedan
-        if (parts.length === 3) {
-            const itemType = parts[1]; // 'house' or 'car'
-            const itemKey = parts[2]; // 'apartment', 'sedan', etc.
-
-            if (itemType === 'house') {
-                const house = houses[itemKey];
-                if (house) {
-                    if (user.money >= house.price) {
-                        if (user.house) {
-                             await sendMessage(chatId, `شما قبلاً یک ${houses[user.house].name} دارید. برای خرید خانه جدید، ابتدا خانه فعلی را بفروشید یا اجاره دهید.`);
-                             return;
-                        }
-                        user.money -= house.price;
-                        user.house = itemKey;
-                        addXP(userId, 100); // XP برای خرید خانه
-                        saveUser(user);
-                        await sendMessage(chatId, `شما ${house.name} را به قیمت ${house.price.toLocaleString()} تومان خریداری کردید.`);
-                        await displayStatus(userId);
-                    } else {
-                        await sendMessage(chatId, `پول کافی برای خرید ${house.name} ندارید. قیمت: ${house.price.toLocaleString()} تومان.`);
-                    }
-                } else {
-                    await sendMessage(chatId, "نوع خانه نامعتبر است.");
-                }
-            } else if (itemType === 'car') {
-                 const car = cars[itemKey];
-                if (car) {
-                    if (user.money >= car.price) {
-                         if (user.car) {
-                             await sendMessage(chatId, `شما قبلاً یک ${cars[user.car].name} دارید. برای خرید ماشین جدید، ابتدا ماشین فعلی را بفروشید.`);
-                             return;
-                        }
-                        user.money -= car.price;
-                        user.car = itemKey;
-                        addXP(userId, 50); // XP برای خرید ماشین
-                        saveUser(user);
-                        await sendMessage(chatId, `شما ${car.name} را به قیمت ${car.price.toLocaleString()} تومان خریداری کردید.`);
-                        await displayStatus(userId);
-                    } else {
-                        await sendMessage(chatId, `پول کافی برای خرید ${car.name} ندارید. قیمت: ${car.price.toLocaleString()} تومان.`);
-                    }
+        // درآمد و XP کمی تصادفی برای جذابیت بیشتر
