@@ -1,154 +1,130 @@
 import express from "express";
+import fetch from "node-fetch";
 
 const app = express();
 app.use(express.json());
 
-const BOT_TOKEN = process.env.BOT_TOKEN;
-const SECRET = process.env.SECRET;
-const PORT = process.env.PORT || 3000;
-
-if (!BOT_TOKEN) throw new Error("Missing env BOT_TOKEN");
-if (!SECRET) throw new Error("Missing env SECRET");
-
-// --- in-memory DB (temporary) ---
-const users = new Map(); // key: chatId, value: user state
-
-function getUser(chatId) {
-  if (!users.has(chatId)) {
-    users.set(chatId, {
-      step: "idle",     // idle | kid_menu
-      age: 6,
-      money: 10,
-      energy: 10,
-      xp: 0,
-    });
-  }
-  return users.get(chatId);
+const { BOT_TOKEN, SECRET } = process.env;
+if (!BOT_TOKEN || !SECRET) {
+  throw new Error("❌ BOT_TOKEN یا SECRET تنظیم نشده! برو Railway → Variables");
 }
 
-async function tg(method, payload) {
-  const r = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/${method}`, {
+const userStates = new Map();
+const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
+
+async function sendMessage(chatId, text) {
+  await fetch(`${TELEGRAM_API}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    body: JSON.stringify({
+      chat_id: chatId,
+      text,
+      // اگه خواستی می‌تونیم Markdown هم فعال کنیم
+      // parse_mode: "Markdown"
+    }),
   });
-  const data = await r.json();
-  if (!data.ok) {
-    console.error("Telegram API error:", data);
-  }
-  return data;
 }
-
-function statusText(u) {
-  return (
-    `وضعیتت:\n` +
-    `سن: ${u.age}\n` +
-    `پول: ${u.money}\n` +
-    `انرژی: ${u.energy}\n` +
-    `تجربه: ${u.xp}\n`
-  );
-}
-
-// health
-app.get("/", (_req, res) => res.status(200).send("OK"));
 
 app.post(`/webhook/${SECRET}`, async (req, res) => {
-  // IMPORTANT: respond fast to Telegram
   res.sendStatus(200);
 
   const msg = req.body?.message;
-  if (!msg?.chat?.id || !msg?.text) return;
+  if (!msg?.text) return;
 
   const chatId = msg.chat.id;
   const text = msg.text.trim();
 
-  const u = getUser(chatId);
+  if (!userStates.has(chatId)) {
+    userStates.set(chatId, { age: 0, money: 100, step: "start" });
+  }
+  const state = userStates.get(chatId);
 
-  // commands
+  // /start
   if (text === "/start") {
-    users.set(chatId, { step: "idle", age: 6, money: 10, energy: 10, xp: 0 });
-    await tg("sendMessage", {
-      chat_id: chatId,
-      text:
-        `خوش اومدی!\n` +
-        `این یه بازی متنیه.\n\n` +
-        `برای شروع بزن: /kid\n` +
-        `برای دیدن وضعیت: /status`,
-    });
+    state.age = 0;
+    state.money = 100;
+    state.step = "start";
+    await sendMessage(
+      chatId,
+      "👋😄 سلام خوش اومدی!\n" +
+        "🎮 اینجا بازیِ زندگیه!\n\n" +
+        "برای شروع بزن:\n" +
+        "🧒 /kid"
+    );
     return;
   }
 
-  if (text === "/status") {
-    await tg("sendMessage", { chat_id: chatId, text: statusText(u) });
-    return;
-  }
-
-  if (text === "/reset") {
-    users.delete(chatId);
-    await tg("sendMessage", { chat_id: chatId, text: "ریست شد. دوباره /start بزن." });
-    return;
-  }
-
+  // /kid
   if (text === "/kid") {
-    u.step = "kid_menu";
-    await tg("sendMessage", {
-      chat_id: chatId,
-      text: `شیش سالته. انتخاب کن:\n/school یا /play`,
-    });
+    state.age = 6;
+    state.step = "childhood";
+    await sendMessage(
+      chatId,
+      "🧒✨ الان ۶ سالته!\n" +
+        "⏳ وقت انتخابه...\n\n" +
+        "🏫 بری مدرسه: /school\n" +
+        "🕹️ بری بازی: /play\n\n" +
+        "📌 وضعیت: /status"
+    );
     return;
   }
 
-  // stage actions
-  if (u.step === "kid_menu") {
-    if (text === "/school") {
-      // effects
-      u.xp += 3;
-      u.energy -= 2;
-      u.money -= 1;
-      if (u.energy < 0) u.energy = 0;
-
-      u.step = "idle";
-      await tg("sendMessage", {
-        chat_id: chatId,
-        text:
-          `رفتی مدرسه. +تجربه، -انرژی، -پول\n\n` +
-          statusText(u) +
-          `مرحله بعد؟ دوباره /kid بزن.`,
-      });
-      return;
-    }
-
-    if (text === "/play") {
-      u.xp += 1;
-      u.energy -= 1;
-      u.money -= 0; // بازی مجانی :)
-      if (u.energy < 0) u.energy = 0;
-
-      u.step = "idle";
-      await tg("sendMessage", {
-        chat_id: chatId,
-        text:
-          `بازی کردی. +تجربه کم، -انرژی کم\n\n` +
-          statusText(u) +
-          `مرحله بعد؟ دوباره /kid بزن.`,
-      });
-      return;
-    }
-
-    await tg("sendMessage", {
-      chat_id: chatId,
-      text: `فقط یکی از اینا رو انتخاب کن:\n/school یا /play`,
-    });
+  // /school (فقط وقتی تو مرحله childhood باشه)
+  if (text === "/school" && state.step === "childhood") {
+    state.age = 7;
+    state.step = "student";
+    await sendMessage(
+      chatId,
+      "🏫📚 آفرین! رفتی مدرسه!\n" +
+        "🧠✨ مغزت آپدیت شد!\n\n" +
+        "🎂 الان ۷ سالته.\n" +
+        "📊 ببین چی شد: /status\n\n" +
+        "ادامه می‌خوای؟ بگو مرحله بعدی رو بسازم 😄🔧"
+    );
     return;
   }
 
-  // default
-  await tg("sendMessage", {
-    chat_id: chatId,
-    text: `دستورها:\n/start\n/kid\n/status\n/reset`,
-  });
+  // /play (فقط وقتی تو مرحله childhood باشه)
+  if (text === "/play" && state.step === "childhood") {
+    state.age = 7;
+    state.money -= 10;
+    state.step = "gamer";
+    await sendMessage(
+      chatId,
+      "🕹️🔥 رفتی بازی!\n" +
+        "😎 خوش گذشت ولی...\n" +
+        "💸 ۱۰ سکه خرج کردی!\n\n" +
+        "🎂 الان ۷ سالته.\n" +
+        "📊 وضعیت: /status\n\n" +
+        "ادامه می‌خوای؟ مرحله بعدی رو می‌سازیم 🚀"
+    );
+    return;
+  }
+
+  // /status
+  if (text === "/status") {
+    await sendMessage(
+      chatId,
+      "📊✨ وضعیت فعلی شما:\n" +
+        `🎂 سن: ${state.age}\n` +
+        `💰 سکه: ${state.money}\n` +
+        `🧩 مرحله: ${state.step}\n\n` +
+        "🧒 شروع دوباره: /kid\n" +
+        "🔁 از اول: /start"
+    );
+    return;
+  }
+
+  // حالت اشتباه/نامرتبط
+  await sendMessage(
+    chatId,
+    "🤔😅 این دستور رو نفهمیدم!\n\n" +
+      "📌 اینا رو امتحان کن:\n" +
+      "🚀 /start\n" +
+      "🧒 /kid\n" +
+      "📊 /status"
+  );
 });
 
-app.listen(PORT, () => {
-  console.log(`Listening on ${PORT}`);
-});
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`✅ Server running on :${PORT}`));
