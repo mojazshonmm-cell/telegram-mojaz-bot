@@ -1,171 +1,107 @@
 import express from 'express';
 
 const app = express();
+app.use(express.json());
 
-// متغیرهای محیطی را مستقیماً از process.env بخوان
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const SECRET_PATH = process.env.SECRET_PATH;
-const PORT = process.env.PORT || 3000; // Railway پورت را از طریق PORT تامین می‌کند
+const PORT = process.env.PORT || 3000;
 
-// بررسی وجود توکن و مسیر مخفی
-if (!BOT_TOKEN) {
-    console.error("FATAL ERROR: BOT_TOKEN is not set in environment variables.");
-    process.exit(1); // خروج از برنامه اگر توکن تنظیم نشده باشد
-}
-if (!SECRET_PATH) {
-    console.error("FATAL ERROR: SECRET_PATH is not set in environment variables.");
-    process.exit(1); // خروج از برنامه اگر مسیر مخفی تنظیم نشده باشد
-}
+// حافظه موقت برای ذخیره وضعیت بازی (اگر سرور ریستارت شود، پاک می‌شود)
+const userStates = new Map();
 
 const TELEGRAM_API_URL = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
-// ----- تابع کمکی برای ارسال پیام -----
-async function sendTelegramMessage(chatId, text, options = {}) {
+// ---------- Telegram Request Helper ----------
+async function telegram(method, payload) {
     try {
-        const response = await fetch(`${TELEGRAM_API_URL}/sendMessage`, {
+        const res = await fetch(`${TELEGRAM_API_URL}/${method}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                chat_id: chatId,
-                text: text,
-                parse_mode: 'HTML', // برای استفاده از فرمت‌بندی HTML
-                ...options, // شامل inline_keyboard و بقیه آپشن‌ها
-            }),
+            body: JSON.stringify(payload),
         });
-        const data = await response.json();
-        if (!data.ok) {
-            console.error(`Telegram API Error: ${data.description} (Code: ${data.error_code})`);
-            // مدیریت خطاهای خاص
-            if (data.error_code === 400 && data.description.includes('chat not found')) {
-                console.warn(`Chat ID ${chatId} not found. User might have blocked the bot.`);
-            }
-        }
-        return data.result;
-    } catch (error) {
-        console.error('Error sending message via Telegram API:', error);
-        return null;
+        return await res.json();
+    } catch (err) {
+        console.error(err);
+        return { ok: false };
     }
 }
 
-// ----- تابع کمکی برای ویرایش پیام -----
-async function editTelegramMessage(chatId, messageId, text, options = {}) {
-    try {
-        const response = await fetch(`${TELEGRAM_API_URL}/editMessageText`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                chat_id: chatId,
-                message_id: messageId,
-                text: text,
-                parse_mode: 'HTML',
-                ...options,
-            }),
-        });
-        const data = await response.json();
-        if (!data.ok) {
-            console.error(`Telegram API Error (editMessageText): ${data.description} (Code: ${data.error_code})`);
-            // ممکن است پیام تکراری باشد یا خطای دیگری رخ دهد
-             if (data.error_code === 400 && data.description.includes('message is not modified')) {
-                 console.log('Message was not modified (already the same text).');
-             }
-        }
-        return data.result;
-    } catch (error) {
-        console.error('Error editing message via Telegram API:', error);
-        return null;
-    }
-}
-
-// ----- ساخت Inline Keyboard -----
-function getMainMenuKeyboard() {
-    return {
+// ---------- Keyboards (Glass Buttons) ----------
+const mainMenu = () => ({
+    reply_markup: {
         inline_keyboard: [
-            [{ text: "بازی کن 🚀", callback_data: "play_game" }],
-            [{ text: "امتیازات برتر 🏆", callback_data: "high_scores" }],
-            [{ text: "راهنما ❓", callback_data: "help" }],
-        ],
-    };
-}
-
-function getGameMenuKeyboard() {
-    return {
-        inline_keyboard: [
-            [{ text: "شروع مرحله اول 🟢", callback_data: "start_level_1" }],
-            [{ text: "بازگشت به منو ↩️", callback_data: "back_to_menu" }],
+            [{ text: "🎮 شروع بازی", callback_data: "start_game" }],
+            [{ text: "❓ راهنما", callback_data: "help" }]
         ]
-    };
-}
+    }
+});
 
-// ----- مسیر Webhook -----
-// اطمینان حاصل کنید که Express JSON request body را پارس می‌کند
-app.use(express.json());
+const gameLevelMarkup = (options) => ({
+    reply_markup: {
+        inline_keyboard: options.map(opt => [{ text: opt.text, callback_data: opt.data }])
+    }
+});
 
+const gameOverMarkup = () => ({
+    reply_markup: {
+        inline_keyboard: [[{ text: "🏠 بازگشت به منو", callback_data: "main_menu" }]]
+    }
+});
+
+// ---------- Webhook Route ----------
 app.post(`/webhook/${SECRET_PATH}`, async (req, res) => {
-    // همیشه یک پاسخ 200 OK سریع بفرست تا تلگرام دوباره پیام نفرستد
     res.sendStatus(200);
-
     const update = req.body;
 
-    // پردازش callback_query (کلیک روی دکمه inline)
+    // --- مدیریت کلیک روی دکمه‌ها ---
     if (update.callback_query) {
-        const callbackQuery = update.callback_query;
-        const chatId = callbackQuery.message.chat.id;
-        const messageId = callbackQuery.message.message_id;
-        const data = callbackQuery.data;
-        const firstName = callbackQuery.from.first_name || "کاربر";
-
-        console.log(`Received callback query: "${data}" from chat ID: ${chatId}`);
-
-        switch (data) {
-            case "play_game":
-                await sendTelegramMessage(chatId, `سلام ${firstName}! آماده‌ای بازی کنیم؟`, getGameMenuKeyboard());
-                // Optional: Edit the original message to show the action taken
-                // await editTelegramMessage(chatId, messageId, "شما گزینه 'بازی کن' را انتخاب کردید.");
-                break;
-            case "high_scores":
-                await sendTelegramMessage(chatId, "امتیازات برتر به زودی نمایش داده می‌شود...", { inline_keyboard: [[{ text: "بازگشت به منو ↩️", callback_data: "back_to_menu" }]] });
-                break;
-            case "help":
-                await sendTelegramMessage(chatId, "این ربات به شما امکان بازی می‌دهد. برای شروع، دکمه 'بازی کن' را بزنید.", { inline_keyboard: [[{ text: "بازگشت به منو ↩️", callback_data: "back_to_menu" }]] });
-                break;
-            case "start_level_1":
-                await sendTelegramMessage(chatId, "شروع مرحله اول...", { inline_keyboard: [[{ text: "بازگشت به منو ↩️", callback_data: "back_to_menu" }]] });
-                // اینجا منطق شروع مرحله اول بازی اضافه می‌شود
-                break;
-            case "back_to_menu":
-                // ویرایش پیام فعلی برای نمایش منوی اصلی
-                await editTelegramMessage(chatId, messageId, "به منوی اصلی خوش آمدید!", getMainMenuKeyboard());
-                break;
-            default:
-                await sendTelegramMessage(chatId, "دستور ناشناخته.", { inline_keyboard: [[{ text: "بازگشت به منو ↩️", callback_data: "back_to_menu" }]] });
-                break;
-        }
-
-    } else if (update.message) { // پردازش پیام عادی
-        const message = update.message;
+        const { id, message, data, from } = update.callback_query;
         const chatId = message.chat.id;
-        const firstName = message.from.first_name || "کاربر";
-        const text = message.text.trim();
+        const msgId = message.message_id;
 
-        console.log(`Received message: "${text}" from chat ID: ${chatId}`);
+        await telegram('answerCallbackQuery', { callback_query_id: id }); // حذف حالت لودینگ دکمه
 
-        if (text === '/start') {
-            // نمایش منوی اصلی با دکمه‌های inline
-            await sendTelegramMessage(chatId, `سلام ${firstName} عزیز! \nبه ربات خوش آمدی. گزینه‌ی مورد نظرت را انتخاب کن:`, getMainMenuKeyboard());
-        } else {
-            // پاسخ به پیام‌های متنی دیگر با نمایش منوی اصلی
-            await sendTelegramMessage(chatId, "لطفاً از دکمه‌های زیر برای تعامل با ربات استفاده کن.", getMainMenuKeyboard());
+        if (data === "start_game") {
+            userStates.set(chatId, { step: 1, score: 0 });
+            await telegram('editMessageText', {
+                chat_id: chatId, message_id: msgId, text: "سوال ۱: حاصل ۲ + ۲ چند است؟",
+                ...gameLevelMarkup([{text: "3", data: "ans_wrong"}, {text: "4", data: "ans_correct1"}])
+            });
+        } 
+        else if (data.startsWith("ans_correct")) {
+            const state = userStates.get(chatId) || { step: 1, score: 0 };
+            state.score += 10;
+            
+            if (state.step === 1) {
+                state.step = 2;
+                await telegram('editMessageText', {
+                    chat_id: chatId, message_id: msgId, text: "آفرین! سوال ۲: پایتخت ایران کجاست؟",
+                    ...gameLevelMarkup([{text: "تهران", data: "ans_correct2"}, {text: "شیراز", data: "ans_wrong"}])
+                });
+            } else {
+                await telegram('editMessageText', {
+                    chat_id: chatId, message_id: msgId, text: `🎉 عالی! بازی تمام شد.\nامتیاز نهایی: ${state.score}`,
+                    ...gameOverMarkup()
+                });
+            }
+        } 
+        else if (data === "ans_wrong") {
+            await telegram('editMessageText', {
+                chat_id: chatId, message_id: msgId, text: "❌ غلط بود! بازی تمام شد.",
+                ...gameOverMarkup()
+            });
         }
+        else if (data === "main_menu" || data === "help") {
+            const text = data === "help" ? "این یک بازی کوییز ساده است." : "به منوی اصلی خوش آمدید.";
+            await telegram('editMessageText', { chat_id: chatId, message_id: msgId, text, ...mainMenu() });
+        }
+    }
+
+    // --- مدیریت پیام متنی /start ---
+    if (update.message?.text === '/start') {
+        await telegram('sendMessage', { chat_id: update.message.chat.id, text: "سلام! آماده بازی هستی؟", ...mainMenu() });
     }
 });
 
-// ----- مسیر اصلی برای چک کردن آنلاین بودن ربات -----
-app.get("/", (req, res) => {
-    res.send("Bot is running!");
-});
-
-// ----- اجرای سرور -----
-app.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`);
-    console.log(`Webhook endpoint: /webhook/${SECRET_PATH}`);
-});
+app.listen(PORT, () => console.log(`Bot active on port ${PORT}`));
