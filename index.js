@@ -5,6 +5,7 @@ app.use(express.json());
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const SECRET_PATH = process.env.SECRET_PATH || 'my-secret-life-bot';
+const ADMIN_ID = String(process.env.ADMIN_ID || '');
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
 if (!BOT_TOKEN) {
@@ -39,6 +40,10 @@ function getUser(chatId) {
     });
   }
   return users.get(chatId);
+}
+
+function isAdmin(userId) {
+  return String(userId) === ADMIN_ID;
 }
 
 function clamp(user) {
@@ -130,6 +135,8 @@ app.post(`/webhook/${SECRET_PATH}`, async (req, res) => {
   try {
     const { message, callback_query } = req.body;
     const chatId = message?.chat?.id || callback_query?.message?.chat?.id;
+    const fromId = message?.from?.id || callback_query?.from?.id;
+
     if (!chatId) return res.sendStatus(200);
 
     const user = getUser(chatId);
@@ -146,6 +153,52 @@ app.post(`/webhook/${SECRET_PATH}`, async (req, res) => {
       return res.sendStatus(200);
     }
 
+    if (message?.text === '/admin') {
+      if (!isAdmin(fromId)) {
+        await sendMessage(chatId, '⛔ فقط ادمین');
+        return res.sendStatus(200);
+      }
+
+      await sendMessage(chatId, '🛠 دستورات ادمین:\n/givecoins USER_ID AMOUNT');
+      return res.sendStatus(200);
+    }
+
+    if (message?.text?.startsWith('/givecoins ')) {
+      if (!isAdmin(fromId)) {
+        await sendMessage(chatId, '⛔ فقط ادمین');
+        return res.sendStatus(200);
+      }
+
+      const parts = message.text.trim().split(/\s+/);
+      const targetUserId = Number(parts[1]);
+      const amount = Number(parts[2]);
+
+      if (!targetUserId || Number.isNaN(amount) || amount <= 0) {
+        await sendMessage(chatId, 'فرمت درست:\n/givecoins USER_ID AMOUNT');
+        return res.sendStatus(200);
+      }
+
+      const targetUser = getUser(targetUserId);
+      targetUser.money += amount;
+      clamp(targetUser);
+
+      await sendMessage(
+        chatId,
+        `✅ ${amount}$ به کاربر ${targetUserId} داده شد.\n💰 پول فعلی: ${targetUser.money}$`
+      );
+
+      try {
+        await sendMessage(
+          targetUserId,
+          `🎁 ادمین بهت ${amount}$ پول داد.\n💰 موجودی فعلی: ${targetUser.money}$`
+        );
+      } catch (e) {
+        console.error('خطا در ارسال پیام به کاربر:', e);
+      }
+
+      return res.sendStatus(200);
+    }
+
     if (message?.text === '/start') {
       await sendMessage(chatId, `سلام 👋\nبه شبیه‌ساز زندگی خوش اومدی.\n\n${statusText(user)}\nیکی از بخش‌ها رو انتخاب کن:`, mainMenu);
       return res.sendStatus(200);
@@ -159,7 +212,6 @@ app.post(`/webhook/${SECRET_PATH}`, async (req, res) => {
       await sendMessage(chatId, `${statusText(user)}\nیکی از گزینه‌ها را انتخاب کن:`, mainMenu);
     }
 
-    // ============ WORK ============
     else if (data === 'work_menu') {
       await sendMessage(chatId, `${statusText(user)}\nیک شغل انتخاب کن:`, [
         [{ text: '🔨 کارگری (+20 | -10❤️ | +10XP)', callback_data: 'work_simple' }],
@@ -172,13 +224,13 @@ app.post(`/webhook/${SECRET_PATH}`, async (req, res) => {
     else if (data === 'work_simple') {
       if (user.health < 10) return sendMessage(chatId, '😵 خسته‌ای، اول استراحت کن.', mainMenu);
       user.job = 'کارگر';
-      reward(user, 20 + user.level * 2, 10, -10);
+      const up = reward(user, 20 + user.level * 2, 10, -10);
       let txt = '✅ کارگری کردی.';
       if (Math.random() < 0.12) {
         user.money += 30;
         txt += '\n🎁 پاداش گرفتی: 30$';
       }
-      if (levelUp(user)) txt += `\n🎉 لول آپ! لول ${user.level}`;
+      if (up) txt += `\n🎉 لول آپ! لول ${user.level}`;
       clamp(user);
       await sendMessage(chatId, `${txt}\n\n${statusText(user)}`, mainMenu);
     }
@@ -186,13 +238,13 @@ app.post(`/webhook/${SECRET_PATH}`, async (req, res) => {
     else if (data === 'work_office') {
       if (user.health < 15) return sendMessage(chatId, '😵 انرژی کافی نداری.', mainMenu);
       user.job = 'کارمند';
-      reward(user, 35 + user.level * 3, 15, -15);
+      const up = reward(user, 35 + user.level * 3, 15, -15);
       let txt = '✅ کار اداری انجام دادی.';
       if (Math.random() < 0.1) {
         user.money += 50;
         txt += '\n📈 پاداش عملکرد: 50$';
       }
-      if (levelUp(user)) txt += `\n🎉 لول آپ! لول ${user.level}`;
+      if (up) txt += `\n🎉 لول آپ! لول ${user.level}`;
       clamp(user);
       await sendMessage(chatId, `${txt}\n\n${statusText(user)}`, mainMenu);
     }
@@ -200,18 +252,17 @@ app.post(`/webhook/${SECRET_PATH}`, async (req, res) => {
     else if (data === 'work_driver') {
       if (user.health < 12) return sendMessage(chatId, '🚫 خیلی خسته‌ای برای رانندگی.', mainMenu);
       user.job = 'راننده';
-      reward(user, 25 + user.level * 2, 12, -12);
+      const up = reward(user, 25 + user.level * 2, 12, -12);
       let txt = '✅ رانندگی کردی.';
       if (Math.random() < 0.08) {
         user.money -= 20;
         txt += '\n🚓 جریمه شدی: 20$';
       }
-      if (levelUp(user)) txt += `\n🎉 لول آپ! لول ${user.level}`;
+      if (up) txt += `\n🎉 لول آپ! لول ${user.level}`;
       clamp(user);
       await sendMessage(chatId, `${txt}\n\n${statusText(user)}`, mainMenu);
     }
 
-    // ============ FUN ============
     else if (data === 'fun_menu') {
       await sendMessage(chatId, `${statusText(user)}\nتفریح انتخاب کن:`, [
         [{ text: '🎬 سینما (-30$ | +15❤️)', callback_data: 'fun_movie' }],
@@ -246,7 +297,6 @@ app.post(`/webhook/${SECRET_PATH}`, async (req, res) => {
       await sendMessage(chatId, `🎵 موسیقی گوش دادی.\n\n${statusText(user)}`, mainMenu);
     }
 
-    // ============ FAMILY ============
     else if (data === 'family_menu') {
       await sendMessage(chatId, `${statusText(user)}\nبخش خانواده:`, [
         [{ text: '📞 تماس (+10 عشق)', callback_data: 'family_call' }],
@@ -279,7 +329,6 @@ app.post(`/webhook/${SECRET_PATH}`, async (req, res) => {
       await sendMessage(chatId, `🧸 با بچه‌ها وقت گذروندی.\n\n${statusText(user)}`, mainMenu);
     }
 
-    // ============ MARRIAGE ============
     else if (data === 'marriage_menu') {
       await sendMessage(chatId, `${statusText(user)}\nازدواج و بچه:`, [
         [{ text: '💘 آشنایی (-20$)', callback_data: 'find_partner' }],
@@ -322,7 +371,6 @@ app.post(`/webhook/${SECRET_PATH}`, async (req, res) => {
       await sendMessage(chatId, `👶 بچه‌دار شدی!\n\n${statusText(user)}`, mainMenu);
     }
 
-    // ============ HOUSE ============
     else if (data === 'house_menu') {
       await sendMessage(chatId, `${statusText(user)}\nبخش خانه:`, [
         [{ text: '🏚 اجاره کوچک (-40$)', callback_data: 'rent_small_house' }],
@@ -359,7 +407,6 @@ app.post(`/webhook/${SECRET_PATH}`, async (req, res) => {
       await sendMessage(chatId, `🏡 ویلا خریدی.\n\n${statusText(user)}`, mainMenu);
     }
 
-    // ============ CAR ============
     else if (data === 'car_menu') {
       await sendMessage(chatId, `${statusText(user)}\nماشین:`, [
         [{ text: '🚗 خرید ماشین معمولی (-150$)', callback_data: 'buy_car_normal' }],
@@ -393,7 +440,6 @@ app.post(`/webhook/${SECRET_PATH}`, async (req, res) => {
       await sendMessage(chatId, `🏎 ماشین لوکس خریدی.\n\n${statusText(user)}`, mainMenu);
     }
 
-    // ============ EDUCATION ============
     else if (data === 'edu_menu') {
       await sendMessage(chatId, `${statusText(user)}\nتحصیل:`, [
         [{ text: '📘 مدرسه (+10XP)', callback_data: 'edu_school' }],
@@ -425,7 +471,6 @@ app.post(`/webhook/${SECRET_PATH}`, async (req, res) => {
       await sendMessage(chatId, `📚 دوره تخصصی گذروندی.\n\n${statusText(user)}`, mainMenu);
     }
 
-    // ============ BANK ============
     else if (data === 'bank_menu') {
       await sendMessage(chatId, `${statusText(user)}\nبانک:`, [
         [{ text: '💵 واریز به بانک', callback_data: 'bank_deposit' }, { text: '💸 برداشت از بانک', callback_data: 'bank_withdraw' }],
@@ -451,7 +496,6 @@ app.post(`/webhook/${SECRET_PATH}`, async (req, res) => {
       await sendMessage(chatId, `💸 ${amount}$ از بانک برداشت شد.\n\n${statusText(user)}`, mainMenu);
     }
 
-    // ============ BUSINESS ============
     else if (data === 'biz_menu') {
       await sendMessage(chatId, `${statusText(user)}\nکسب‌وکار:`, [
         [{ text: '🏪 مغازه کوچک (-200$)', callback_data: 'biz_shop' }],
@@ -476,7 +520,6 @@ app.post(`/webhook/${SECRET_PATH}`, async (req, res) => {
       await sendMessage(chatId, `🏬 شرکت راه انداختی.\n\n${statusText(user)}`, mainMenu);
     }
 
-    // ============ CRIME ============
     else if (data === 'crime_menu') {
       await sendMessage(chatId, `${statusText(user)}\nجرم و زندان:`, [
         [{ text: '😈 دزدی (+40$ | خطر زندان)', callback_data: 'steal' }],
@@ -514,7 +557,6 @@ app.post(`/webhook/${SECRET_PATH}`, async (req, res) => {
       }
     }
 
-    // ============ MAFIA ============
     else if (data === 'mafia_menu') {
       await sendMessage(chatId, `${statusText(user)}\nمافیا:`, [
         [{ text: '🕶 ورود به مافیا (-100$)', callback_data: 'join_mafia' }],
@@ -552,7 +594,6 @@ app.post(`/webhook/${SECRET_PATH}`, async (req, res) => {
       }
     }
 
-    // ============ HOSPITAL ============
     else if (data === 'hospital') {
       if (user.money < 50) return sendMessage(chatId, '💸 هزینه بیمارستان 50$ است.', mainMenu);
       user.money -= 50;
