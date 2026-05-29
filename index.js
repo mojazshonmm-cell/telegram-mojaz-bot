@@ -5,7 +5,7 @@ app.use(express.json());
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const SECRET_PATH = process.env.SECRET_PATH || 'my-secret-life-bot';
-const ADMIN_ID = String(process.env.ADMIN_ID || '');
+const ADMIN_ID = '5576592239'; // <<< آیدی شما اینجا گذاشته شد
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
 if (!BOT_TOKEN) {
