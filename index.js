@@ -1,853 +1,886 @@
-require('dotenv').config();
-const express = require('express');
-const fs = require('fs');
-const path = require('path');
+import express from 'express';
 
-/* =========================
-   CONFIG
-========================= */
-const CONFIG = {
-  TOKEN: process.env.BOT_TOKEN,
-  PORT: process.env.PORT || 3000,
-  WEBHOOK_URL: process.env.WEBHOOK_URL,
-  BOT_USERNAME: process.env.BOT_USERNAME || '',
-  ADMIN_IDS: (process.env.ADMIN_IDS || '')
-    .split(',')
-    .map(x => x.trim())
-    .filter(Boolean),
+const app = express();
+app.use(express.json());
 
-  DATA_DIR: path.join(process.cwd(), 'data'),
-  USERS_FILE: path.join(process.cwd(), 'data', 'users.json'),
-  META_FILE: path.join(process.cwd(), 'data', 'meta.json'),
-  ADMIN_LOG_FILE: path.join(process.cwd(), 'data', 'admin.log'),
-  ERROR_LOG_FILE: path.join(process.cwd(), 'data', 'error.log')
-};
+const BOT_TOKEN = process.env.BOT_TOKEN;
+const SECRET_PATH = process.env.SECRET_PATH || 'my-secret-life-bot';
+const ADMIN_ID = '5576592239';
+const PORT = process.env.PORT || 3000;
 
-if (!CONFIG.TOKEN) {
-  console.error('BOT_TOKEN تنظیم نشده');
+if (!BOT_TOKEN) {
+  console.error('❌ BOT_TOKEN تنظیم نشده');
   process.exit(1);
 }
 
-/* =========================
-   HELPERS
-========================= */
-function now() {
-  return Date.now();
-}
+const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
-function clamp(value, min, max) {
-  return Math.max(min, Math.min(max, value));
-}
+// =========================
+// RAM STORAGE
+// =========================
+const users = new Map();
 
-function formatNumber(n) {
-  return new Intl.NumberFormat('fa-IR').format(Math.floor(n || 0));
-}
-
-function isNumeric(v) {
-  return /^-?\d+$/.test(String(v));
-}
-
-function safeJsonParse(text, fallback = {}) {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return fallback;
+function getUser(chatId) {
+  if (!users.has(chatId)) {
+    users.set(chatId, {
+      money: 100,
+      bank: 0,
+      health: 100,
+      xp: 0,
+      level: 1,
+      job: 'بیکار',
+      education: 'ندارد',
+      married: false,
+      spouse: null,
+      house: null,
+      car: null,
+      children: 0,
+      familyLove: 50,
+      business: null,
+      criminal: false,
+      jailTurns: 0,
+      mafiaJoined: false,
+      mafiaRank: null
+    });
   }
-}
-
-function formatDuration(ms) {
-  if (ms <= 0) return '0ث';
-  const s = Math.ceil(ms / 1000);
-  const d = Math.floor(s / 86400);
-  const h = Math.floor((s % 86400) / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const sec = s % 60;
-
-  const parts = [];
-  if (d) parts.push(`${d}روز`);
-  if (h) parts.push(`${h}ساعت`);
-  if (m) parts.push(`${m}دقیقه`);
-  if (sec && parts.length < 2) parts.push(`${sec}ث`);
-  return parts.join(' ');
-}
-
-function parseCommand(text = '') {
-  const parts = text.trim().split(/\s+/);
-  const cmd = parts[0].replace('/', '').split('@')[0].toLowerCase();
-  return { cmd, args: parts.slice(1) };
-}
-
-function ensureDir(dir) {
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-}
-
-function ensureFile(file, defaultContent = '') {
-  if (!fs.existsSync(file)) fs.writeFileSync(file, defaultContent, 'utf8');
-}
-
-function atomicWrite(file, data) {
-  const tmp = file + '.tmp';
-  fs.writeFileSync(tmp, data, 'utf8');
-  fs.renameSync(tmp, file);
-}
-
-function appendLog(file, text) {
-  ensureFile(file, '');
-  fs.appendFileSync(file, text + '\n', 'utf8');
-}
-
-function logAdmin(text) {
-  appendLog(CONFIG.ADMIN_LOG_FILE, `[${new Date().toISOString()}] ${text}`);
-}
-
-function logError(err, context = '') {
-  const msg = err?.stack || err?.message || String(err);
-  appendLog(CONFIG.ERROR_LOG_FILE, `[${new Date().toISOString()}] ${context} ${msg}`);
+  return users.get(chatId);
 }
 
 function isAdmin(userId) {
-  return CONFIG.ADMIN_IDS.includes(String(userId));
+  return String(userId) === ADMIN_ID;
 }
 
-/* =========================
-   STORAGE
-========================= */
-const state = {
-  users: {},
-  meta: {
-    createdAt: now(),
-    updatedAt: now(),
-    totalUsers: 0
-  }
-};
-
-function ensureDataFiles() {
-  ensureDir(CONFIG.DATA_DIR);
-  ensureFile(CONFIG.USERS_FILE, '{}');
-  ensureFile(CONFIG.META_FILE, JSON.stringify(state.meta, null, 2));
-  ensureFile(CONFIG.ADMIN_LOG_FILE, '');
-  ensureFile(CONFIG.ERROR_LOG_FILE, '');
+function clamp(user) {
+  user.money = Math.max(0, Math.floor(user.money));
+  user.bank = Math.max(0, Math.floor(user.bank));
+  user.health = Math.max(0, Math.min(100, Math.floor(user.health)));
+  user.familyLove = Math.max(0, Math.min(100, Math.floor(user.familyLove)));
+  user.xp = Math.max(0, Math.floor(user.xp));
+  user.level = Math.max(1, Math.floor(user.level));
+  user.children = Math.max(0, Math.floor(user.children));
+  user.jailTurns = Math.max(0, Math.floor(user.jailTurns));
 }
 
-function loadData() {
-  try {
-    ensureDataFiles();
-    state.users = safeJsonParse(fs.readFileSync(CONFIG.USERS_FILE, 'utf8'), {});
-    state.meta = safeJsonParse(fs.readFileSync(CONFIG.META_FILE, 'utf8'), state.meta);
-    state.meta.totalUsers = Object.keys(state.users).length;
-  } catch (err) {
-    logError(err, 'loadData');
-  }
+function statusText(user) {
+  return `📊 *وضعیت شما*
+💰 پول نقد: ${user.money}$
+🏦 بانک: ${user.bank}$
+❤️ سلامتی: ${user.health}%
+⭐ لول: ${user.level}
+🧠 XP: ${user.xp}
+💼 شغل: ${user.job}
+🎓 تحصیل: ${user.education}
+💍 تاهل: ${user.married ? `متاهل با ${user.spouse}` : 'مجرد'}
+🏠 خانه: ${user.house || 'ندارد'}
+🚗 ماشین: ${user.car || 'ندارد'}
+👶 بچه: ${user.children}
+👨‍👩‍👧 عشق خانوادگی: ${user.familyLove}%
+🏢 کسب‌وکار: ${user.business || 'ندارد'}
+🚔 وضعیت جرم: ${user.criminal ? 'خلافکار' : 'سالم'}
+🔒 زندان: ${user.jailTurns > 0 ? `${user.jailTurns} نوبت` : 'آزاد'}
+🕴 مافیا: ${user.mafiaJoined ? `عضو (${user.mafiaRank || 'عضو'})` : 'عضو نیست'}
+━━━━━━━━━━━━━━`;
 }
 
-function saveData() {
-  try {
-    ensureDataFiles();
-    state.meta.updatedAt = now();
-    state.meta.totalUsers = Object.keys(state.users).length;
-
-    atomicWrite(CONFIG.USERS_FILE, JSON.stringify(state.users, null, 2));
-    atomicWrite(CONFIG.META_FILE, JSON.stringify(state.meta, null, 2));
-  } catch (err) {
-    logError(err, 'saveData');
-  }
-}
-
-function startAutosave(intervalMs = 30000) {
-  setInterval(() => {
-    try {
-      saveData();
-    } catch (err) {
-      logError(err, 'autosave');
-    }
-  }, intervalMs).unref();
-}
-
-function getUser(id) {
-  const key = String(id);
-
-  if (!state.users[key]) {
-    state.users[key] = {
-      id: key,
-      username: '',
-      firstName: '',
-      coins: 500,
-      bank: 0,
-      level: 1,
-      xp: 0,
-      health: 100,
-      happiness: 100,
-      hunger: 100,
-      energy: 100,
-      banned: false,
-      banReason: '',
-      createdAt: now(),
-      updatedAt: now(),
-      lastActionAt: 0,
-      cooldowns: {},
-      stats: {
-        work: 0,
-        fun: 0,
-        family: 0,
-        marriage: 0,
-        house: 0,
-        car: 0,
-        education: 0,
-        bank: 0,
-        business: 0,
-        crime: 0,
-        mafia: 0,
-        hospital: 0
-      },
-      _spam: {}
-    };
-  }
-
-  state.users[key].updatedAt = now();
-  return state.users[key];
-}
-
-/* =========================
-   TELEGRAM API
-========================= */
-async function tg(method, data) {
-  const res = await fetch(`https://api.telegram.org/bot${CONFIG.TOKEN}/${method}`, {
+async function tg(method, payload) {
+  const response = await fetch(`${TELEGRAM_API}/${method}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(data)
+    body: JSON.stringify(payload)
   });
-  return res.json();
+  return response.json();
 }
 
-function sendMessage(chatId, text, reply_markup = undefined, parse_mode = undefined) {
+async function sendMessage(chatId, text, keyboard = null) {
   return tg('sendMessage', {
     chat_id: chatId,
     text,
-    reply_markup,
-    parse_mode
+    parse_mode: 'Markdown',
+    reply_markup: keyboard ? { inline_keyboard: keyboard } : undefined
   });
 }
 
-function editMessageText(chatId, messageId, text, reply_markup = undefined, parse_mode = undefined) {
-  return tg('editMessageText', {
-    chat_id: chatId,
-    message_id: messageId,
-    text,
-    reply_markup,
-    parse_mode
-  });
-}
-
-function answerCallbackQuery(callbackQueryId, text = undefined, show_alert = false) {
+async function answerCallbackQuery(callbackQueryId) {
   return tg('answerCallbackQuery', {
-    callback_query_id: callbackQueryId,
-    text,
-    show_alert
+    callback_query_id: callbackQueryId
   });
 }
 
-function setWebhook(url) {
-  return tg('setWebhook', { url });
-}
-
-/* =========================
-   MENUS
-========================= */
-function mainMenu() {
-  return {
-    inline_keyboard: [
-      [{ text: '💼 کار', callback_data: 'game:work' }, { text: '🎉 سرگرمی', callback_data: 'game:fun' }],
-      [{ text: '👨‍👩‍👧 خانواده', callback_data: 'game:family' }, { text: '💍 ازدواج', callback_data: 'game:marriage' }],
-      [{ text: '🏠 خانه', callback_data: 'game:house' }, { text: '🚗 ماشین', callback_data: 'game:car' }],
-      [{ text: '🎓 آموزش', callback_data: 'game:education' }, { text: '🏦 بانک', callback_data: 'game:bank' }],
-      [{ text: '🏢 بیزینس', callback_data: 'game:business' }, { text: '🕵️ جرم', callback_data: 'game:crime' }],
-      [{ text: '👑 مافیا', callback_data: 'game:mafia' }, { text: '🏥 بیمارستان', callback_data: 'game:hospital' }],
-      [{ text: '👤 پروفایل', callback_data: 'game:profile' }]
-    ]
-  };
-}
-
-function adminMenu() {
-  return {
-    inline_keyboard: [
-      [{ text: '📊 آمار', callback_data: 'admin:stats' }],
-      [{ text: 'راهنما', callback_data: 'admin:help' }]
-    ]
-  };
-}
-
-/* =========================
-   COOLDOWNS / ANTI SPAM
-========================= */
-const COOLDOWNS = {
-  work: 60 * 1000,
-  fun: 30 * 1000,
-  family: 5 * 60 * 1000,
-  marriage: 10 * 60 * 1000,
-  house: 15 * 60 * 1000,
-  car: 15 * 60 * 1000,
-  education: 20 * 60 * 1000,
-  bank: 2 * 60 * 1000,
-  business: 5 * 60 * 1000,
-  crime: 3 * 60 * 1000,
-  mafia: 10 * 60 * 1000,
-  hospital: 2 * 60 * 1000
-};
-
-function checkCooldown(user, action) {
-  const cd = COOLDOWNS[action];
-  if (!cd) return { ok: true };
-
-  const last = user.cooldowns?.[action] || 0;
-  const diff = now() - last;
-
-  if (diff < cd) {
-    return {
-      ok: false,
-      text: `⏳ باید ${formatDuration(cd - diff)} صبر کنی.`
-    };
+function levelUp(user) {
+  const need = user.level * 50;
+  if (user.xp >= need) {
+    user.xp -= need;
+    user.level++;
+    return true;
   }
-
-  return { ok: true };
+  return false;
 }
 
-function setCooldown(user, action) {
-  user.cooldowns ||= {};
-  user.cooldowns[action] = now();
+function reward(user, money, xp, health = 0) {
+  user.money += money;
+  user.xp += xp;
+  user.health += health;
+  const up = levelUp(user);
+  clamp(user);
+  return up;
 }
 
-function checkSpam(user, key = 'callback', limit = 500) {
-  user._spam ||= {};
-  const last = user._spam[key] || 0;
-  const diff = now() - last;
-  user._spam[key] = now();
-  return diff < limit;
+function punishment(user, money, health = 0) {
+  user.money -= money;
+  user.health -= health;
+  clamp(user);
 }
 
-/* =========================
-   GAME ACTIONS
-========================= */
-function runWork(user) {
-  const cd = checkCooldown(user, 'work');
-  if (!cd.ok) return cd;
+// =========================
+// MENUS
+// =========================
+const mainMenu = [
+  [{ text: '💼 کار', callback_data: 'work_menu' }, { text: '🎡 تفریح', callback_data: 'fun_menu' }],
+  [{ text: '👨‍👩‍👧 خانواده', callback_data: 'family_menu' }, { text: '💍 ازدواج', callback_data: 'marriage_menu' }],
+  [{ text: '🏠 خانه', callback_data: 'house_menu' }, { text: '🚗 ماشین', callback_data: 'car_menu' }],
+  [{ text: '🎓 تحصیل', callback_data: 'edu_menu' }, { text: '🏦 بانک', callback_data: 'bank_menu' }],
+  [{ text: '🏢 کسب‌وکار', callback_data: 'biz_menu' }, { text: '🚔 جرم و زندان', callback_data: 'crime_menu' }],
+  [{ text: '🕴 مافیا', callback_data: 'mafia_menu' }, { text: '🏥 بیمارستان', callback_data: 'hospital' }],
+  [{ text: '🔄 تازه‌سازی', callback_data: 'refresh' }]
+];
 
-  const gain = Math.floor(100 + Math.random() * 400);
-  user.coins += gain;
-  user.xp += 10;
-  user.energy = clamp(user.energy - 10, 0, 100);
-  user.happiness = clamp(user.happiness - 2, 0, 100);
-  user.stats.work++;
-  user.lastActionAt = now();
-  setCooldown(user, 'work');
-  saveData();
+const back = [[{ text: '🔙 بازگشت', callback_data: 'main' }]];
 
-  return { ok: true, text: `💼 کار کردی و ${formatNumber(gain)} کوین گرفتی.` };
-}
+// =========================
+// ROUTES
+// =========================
+app.get('/', (req, res) => {
+  res.send('Life Simulator Bot is running ✅');
+});
 
-function runFun(user) {
-  const cd = checkCooldown(user, 'fun');
-  if (!cd.ok) return cd;
-
-  const cost = 50;
-  if (user.coins < cost) return { ok: false, text: `❌ برای سرگرمی ${formatNumber(cost)} کوین نیاز داری.` };
-
-  user.coins -= cost;
-  user.happiness = clamp(user.happiness + 12, 0, 100);
-  user.energy = clamp(user.energy + 3, 0, 100);
-  user.stats.fun++;
-  user.lastActionAt = now();
-  setCooldown(user, 'fun');
-  saveData();
-
-  return { ok: true, text: `🎉 خوش گذروندی. ${formatNumber(cost)} کوین خرج شد.` };
-}
-
-function runFamily(user) {
-  const cd = checkCooldown(user, 'family');
-  if (!cd.ok) return cd;
-
-  user.happiness = clamp(user.happiness + 10, 0, 100);
-  user.energy = clamp(user.energy - 5, 0, 100);
-  user.stats.family++;
-  user.lastActionAt = now();
-  setCooldown(user, 'family');
-  saveData();
-
-  return { ok: true, text: `👨‍👩‍👧 با خانواده وقت گذراندی و حالت بهتر شد.` };
-}
-
-function runMarriage(user) {
-  const cd = checkCooldown(user, 'marriage');
-  if (!cd.ok) return cd;
-
-  user.happiness = clamp(user.happiness + 5, 0, 100);
-  user.stats.marriage++;
-  user.lastActionAt = now();
-  setCooldown(user, 'marriage');
-  saveData();
-
-  return { ok: true, text: `💍 بخش ازدواج فعلاً در حالت ساده فعال است.` };
-}
-
-function runHouse(user) {
-  const cd = checkCooldown(user, 'house');
-  if (!cd.ok) return cd;
-
-  user.stats.house++;
-  user.lastActionAt = now();
-  setCooldown(user, 'house');
-  saveData();
-
-  return { ok: true, text: `🏠 بخش خانه فعال شد.` };
-}
-
-function runCar(user) {
-  const cd = checkCooldown(user, 'car');
-  if (!cd.ok) return cd;
-
-  user.stats.car++;
-  user.lastActionAt = now();
-  setCooldown(user, 'car');
-  saveData();
-
-  return { ok: true, text: `🚗 بخش ماشین فعال شد.` };
-}
-
-function runEducation(user) {
-  const cd = checkCooldown(user, 'education');
-  if (!cd.ok) return cd;
-
-  user.xp += 20;
-  user.energy = clamp(user.energy - 5, 0, 100);
-  user.stats.education++;
-  user.lastActionAt = now();
-  setCooldown(user, 'education');
-  saveData();
-
-  return { ok: true, text: `🎓 درس خواندی و 20 XP گرفتی.` };
-}
-
-function runBank(user) {
-  const cd = checkCooldown(user, 'bank');
-  if (!cd.ok) return cd;
-
-  const amount = Math.floor(Math.min(user.coins, 200));
-  if (amount <= 0) return { ok: false, text: '🏦 پولی برای واریز به بانک نداری.' };
-
-  user.coins -= amount;
-  user.bank += amount;
-  user.stats.bank++;
-  user.lastActionAt = now();
-  setCooldown(user, 'bank');
-  saveData();
-
-  return { ok: true, text: `🏦 مبلغ ${formatNumber(amount)} کوین به بانک واریز شد.` };
-}
-
-function runBusiness(user) {
-  const cd = checkCooldown(user, 'business');
-  if (!cd.ok) return cd;
-
-  if (user.coins < 200) return { ok: false, text: '🏢 برای بیزینس حداقل 200 کوین نیاز داری.' };
-
-  const gain = Math.floor(50 + Math.random() * 250);
-  user.coins += gain;
-  user.stats.business++;
-  user.lastActionAt = now();
-  setCooldown(user, 'business');
-  saveData();
-
-  return { ok: true, text: `🏢 از بیزینست ${formatNumber(gain)} کوین سود کردی.` };
-}
-
-function runCrime(user) {
-  const cd = checkCooldown(user, 'crime');
-  if (!cd.ok) return cd;
-
-  const success = Math.random() < 0.6;
-  const amount = Math.floor(100 + Math.random() * 500);
-
-  if (success) {
-    user.coins += amount;
-  } else {
-    user.coins = Math.max(0, user.coins - Math.floor(amount / 2));
-    user.health = clamp(user.health - 10, 0, 100);
-  }
-
-  user.stats.crime++;
-  user.lastActionAt = now();
-  setCooldown(user, 'crime');
-  saveData();
-
-  return {
-    ok: true,
-    text: success
-      ? `🕵️ جرم موفق بود و ${formatNumber(amount)} کوین به دست آوردی.`
-      : `🚨 گیر افتادی و جریمه شدی.`
-  };
-}
-
-function runMafia(user) {
-  const cd = checkCooldown(user, 'mafia');
-  if (!cd.ok) return cd;
-
-  const success = Math.random() < 0.45;
-  const amount = Math.floor(300 + Math.random() * 1000);
-
-  if (success) {
-    user.coins += amount;
-    user.happiness = clamp(user.happiness + 5, 0, 100);
-  } else {
-    user.coins = Math.max(0, user.coins - Math.floor(amount / 3));
-    user.health = clamp(user.health - 20, 0, 100);
-  }
-
-  user.stats.mafia++;
-  user.lastActionAt = now();
-  setCooldown(user, 'mafia');
-  saveData();
-
-  return {
-    ok: true,
-    text: success
-      ? `👑 عملیات مافیا موفق شد و ${formatNumber(amount)} کوین گرفتی.`
-      : `💥 عملیات مافیا شکست خورد و آسیب دیدی.`
-  };
-}
-
-function runHospital(user) {
-  const cd = checkCooldown(user, 'hospital');
-  if (!cd.ok) return cd;
-
-  const cost = 100;
-  if (user.coins < cost) return { ok: false, text: `🏥 برای درمان ${formatNumber(cost)} کوین نیاز داری.` };
-
-  user.coins -= cost;
-  user.health = clamp(user.health + 25, 0, 100);
-  user.stats.hospital++;
-  user.lastActionAt = now();
-  setCooldown(user, 'hospital');
-  saveData();
-
-  return { ok: true, text: `🏥 درمان شدی و ${formatNumber(cost)} کوین پرداخت کردی.` };
-}
-
-function getProfileText(user) {
-  return [
-    `👤 پروفایل ${user.firstName || 'کاربر'}`,
-    ``,
-    `💰 کوین: ${formatNumber(user.coins)}`,
-    `🏦 بانک: ${formatNumber(user.bank)}`,
-    `⭐ سطح: ${formatNumber(user.level)}`,
-    `🧠 XP: ${formatNumber(user.xp)}`,
-    `❤️ سلامتی: ${formatNumber(user.health)}`,
-    `😄 خوشحالی: ${formatNumber(user.happiness)}`,
-    `🍔 گرسنگی: ${formatNumber(user.hunger)}`,
-    `⚡ انرژی: ${formatNumber(user.energy)}`
-  ].join('\n');
-}
-
-/* =========================
-   ADMIN COMMANDS
-========================= */
-async function handleAdminCommand(msg, user, cmd, args) {
-  const chatId = msg.chat.id;
-
-  if (!isAdmin(user.id)) {
-    return sendMessage(chatId, '⛔️ شما ادمین نیستی.');
-  }
-
-  if (cmd === 'stats') {
-    const totalUsers = Object.keys(state.users).length;
-    return sendMessage(chatId, `📊 آمار ربات\n\n👥 تعداد کاربران: ${formatNumber(totalUsers)}`);
-  }
-
-  if (cmd === 'admin') {
-    return sendMessage(
-      chatId,
-      [
-        '👮 پنل ادمین',
-        '',
-        '/stats',
-        '/givecoins USER_ID AMOUNT',
-        '/takecoins USER_ID AMOUNT',
-        '/setcoins USER_ID AMOUNT',
-        '/ban USER_ID دلیل',
-        '/unban USER_ID'
-      ].join('\n'),
-      adminMenu()
-    );
-  }
-
-  const targetId = args[0];
-  if (!targetId || !isNumeric(targetId)) {
-    return sendMessage(chatId, '❗️ آیدی عددی کاربر را درست وارد کن.');
-  }
-
-  const target = getUser(targetId);
-
-  if (cmd === 'givecoins') {
-    const amount = Number(args[1]);
-    if (!Number.isFinite(amount) || amount <= 0) {
-      return sendMessage(chatId, '❗️ مقدار نامعتبر است.');
-    }
-    target.coins += Math.floor(amount);
-    saveData();
-    logAdmin(`givecoins by ${user.id} to ${targetId} amount=${amount}`);
-    return sendMessage(chatId, `✅ ${formatNumber(amount)} کوین به ${targetId} داده شد.`);
-  }
-
-  if (cmd === 'takecoins') {
-    const amount = Number(args[1]);
-    if (!Number.isFinite(amount) || amount <= 0) {
-      return sendMessage(chatId, '❗️ مقدار نامعتبر است.');
-    }
-    target.coins = Math.max(0, target.coins - Math.floor(amount));
-    saveData();
-    logAdmin(`takecoins by ${user.id} from ${targetId} amount=${amount}`);
-    return sendMessage(chatId, `✅ ${formatNumber(amount)} کوین از ${targetId} گرفته شد.`);
-  }
-
-  if (cmd === 'setcoins') {
-    const amount = Number(args[1]);
-    if (!Number.isFinite(amount) || amount < 0) {
-      return sendMessage(chatId, '❗️ مقدار نامعتبر است.');
-    }
-    target.coins = Math.floor(amount);
-    saveData();
-    logAdmin(`setcoins by ${user.id} to ${targetId} amount=${amount}`);
-    return sendMessage(chatId, `✅ کوین کاربر ${targetId} روی ${formatNumber(amount)} تنظیم شد.`);
-  }
-
-  if (cmd === 'ban') {
-    const reason = args.slice(1).join(' ') || 'No reason';
-    target.banned = true;
-    target.banReason = reason;
-    saveData();
-    logAdmin(`ban by ${user.id} target=${targetId} reason=${reason}`);
-    return sendMessage(chatId, `✅ کاربر ${targetId} بن شد.\n📝 دلیل: ${reason}`);
-  }
-
-  if (cmd === 'unban') {
-    target.banned = false;
-    target.banReason = '';
-    saveData();
-    logAdmin(`unban by ${user.id} target=${targetId}`);
-    return sendMessage(chatId, `✅ کاربر ${targetId} آنبن شد.`);
-  }
-
-  return sendMessage(chatId, '❓ دستور ادمین نامعتبر است.');
-}
-
-/* =========================
-   MESSAGE / CALLBACK
-========================= */
-async function onMessage(msg) {
+app.post(`/webhook/${SECRET_PATH}`, async (req, res) => {
   try {
-    const chatId = msg.chat.id;
-    const from = msg.from;
-    if (!from) return;
+    const { message, callback_query } = req.body;
+    const chatId = message?.chat?.id || callback_query?.message?.chat?.id;
+    const fromId = message?.from?.id || callback_query?.from?.id;
+    const text = message?.text;
 
-    const user = getUser(from.id);
-    user.username = from.username || user.username || '';
-    user.firstName = from.first_name || user.firstName || '';
+    if (!chatId) return res.sendStatus(200);
 
-    if (user.banned) {
-      return sendMessage(chatId, `🚫 شما بن هستی.\n📝 دلیل: ${user.banReason || 'نامشخص'}`);
+    const user = getUser(chatId);
+
+    if (callback_query?.id) {
+      await answerCallbackQuery(callback_query.id);
     }
 
-    if (!msg.text) return;
+    // =========================
+    // JAIL CHECK
+    // =========================
+    if (
+      user.jailTurns > 0 &&
+      callback_query?.data !== 'main' &&
+      callback_query?.data !== 'refresh'
+    ) {
+      user.jailTurns--;
+      clamp(user);
 
-    const { cmd, args } = parseCommand(msg.text);
+      if (user.jailTurns === 0) {
+        user.criminal = false;
+        await sendMessage(chatId, '🔓 از زندان آزاد شدی!', mainMenu);
+      } else {
+        await sendMessage(
+          chatId,
+          `🚔 هنوز زندانی هستی. ${user.jailTurns} نوبت باقی مانده.`,
+          mainMenu
+        );
+      }
 
-    if (cmd === 'start') {
-      saveData();
-      return sendMessage(
+      return res.sendStatus(200);
+    }
+
+    // =========================
+    // ADMIN COMMANDS
+    // =========================
+    if (text === '/myid') {
+      await sendMessage(chatId, `Your ID: ${fromId}`);
+      return res.sendStatus(200);
+    }
+
+    if (text === '/admin') {
+      if (!isAdmin(fromId)) {
+        await sendMessage(chatId, `⛔ فقط ادمین\nID تو: ${fromId}`);
+        return res.sendStatus(200);
+      }
+
+      await sendMessage(
         chatId,
-        `سلام ${user.firstName || 'دوست من'} 👋\n\nبه ربات شبیه‌ساز زندگی خوش اومدی.`,
-        mainMenu()
+        `🛠 *پنل ادمین*
+
+دستورها:
+/givecoins USER_ID AMOUNT
+
+مثال:
+/givecoins 123456789 500`
       );
+      return res.sendStatus(200);
     }
 
-    if (cmd === 'profile') {
-      return sendMessage(chatId, getProfileText(user), mainMenu());
-    }
-
-    const adminCommands = ['admin', 'stats', 'givecoins', 'takecoins', 'setcoins', 'ban', 'unban'];
-    if (adminCommands.includes(cmd)) {
-      return handleAdminCommand(msg, user, cmd, args);
-    }
-
-    const actionMap = {
-      work: runWork,
-      fun: runFun,
-      family: runFamily,
-      marriage: runMarriage,
-      house: runHouse,
-      car: runCar,
-      education: runEducation,
-      bank: runBank,
-      business: runBusiness,
-      crime: runCrime,
-      mafia: runMafia,
-      hospital: runHospital
-    };
-
-    if (actionMap[cmd]) {
-      const result = actionMap[cmd](user);
-      return sendMessage(chatId, result.text, mainMenu());
-    }
-
-    return sendMessage(chatId, '❓ دستور ناشناخته است.', mainMenu());
-  } catch (err) {
-    logError(err, 'onMessage');
-  }
-}
-
-async function onCallback(q) {
-  try {
-    const chatId = q.message.chat.id;
-    const messageId = q.message.message_id;
-    const user = getUser(q.from.id);
-
-    if (checkSpam(user, 'callback')) {
-      return answerCallbackQuery(q.id, 'خیلی سریع کلیک نکن.', false);
-    }
-
-    if (user.banned) {
-      return answerCallbackQuery(q.id, 'شما بن هستی.', true);
-    }
-
-    const data = q.data || '';
-    const [group, action] = data.split(':');
-
-    if (group === 'admin') {
-      if (!isAdmin(user.id)) {
-        return answerCallbackQuery(q.id, 'شما ادمین نیستی.', true);
+    if (text?.startsWith('/givecoins')) {
+      if (!isAdmin(fromId)) {
+        await sendMessage(chatId, '⛔ فقط ادمین');
+        return res.sendStatus(200);
       }
 
-      if (action === 'stats') {
-        const totalUsers = Object.keys(state.users).length;
-        await answerCallbackQuery(q.id, 'نمایش آمار', false);
-        return editMessageText(
-          chatId,
-          messageId,
-          `📊 آمار ربات\n\n👥 تعداد کاربران: ${formatNumber(totalUsers)}`,
-          adminMenu()
-        );
+      const parts = text.trim().split(/\s+/);
+      const targetUserId = Number(parts[1]);
+      const amount = Number(parts[2]);
+
+      if (!targetUserId || Number.isNaN(amount) || amount <= 0) {
+        await sendMessage(chatId, 'فرمت درست:\n/givecoins USER_ID AMOUNT');
+        return res.sendStatus(200);
       }
 
-      if (action === 'help') {
-        await answerCallbackQuery(q.id, 'راهنما', false);
-        return editMessageText(
-          chatId,
-          messageId,
-          [
-            '👮 راهنمای ادمین',
-            '',
-            '/stats',
-            '/givecoins USER_ID AMOUNT',
-            '/takecoins USER_ID AMOUNT',
-            '/setcoins USER_ID AMOUNT',
-            '/ban USER_ID دلیل',
-            '/unban USER_ID'
-          ].join('\n'),
-          adminMenu()
-        );
-      }
-    }
+      const targetUser = getUser(targetUserId);
+      targetUser.money += amount;
+      clamp(targetUser);
 
-    if (group !== 'game') {
-      return answerCallbackQuery(q.id, 'نامعتبر', false);
-    }
+      await sendMessage(
+        chatId,
+        `✅ ${amount}$ به کاربر ${targetUserId} داده شد.
+💰 پول فعلی: ${targetUser.money}$`
+      );
 
-    if (action === 'profile') {
-      await answerCallbackQuery(q.id, 'پروفایل', false);
-      return editMessageText(chatId, messageId, getProfileText(user), mainMenu());
-    }
-
-    const actionMap = {
-      work: runWork,
-      fun: runFun,
-      family: runFamily,
-      marriage: runMarriage,
-      house: runHouse,
-      car: runCar,
-      education: runEducation,
-      bank: runBank,
-      business: runBusiness,
-      crime: runCrime,
-      mafia: runMafia,
-      hospital: runHospital
-    };
-
-    const fn = actionMap[action];
-    if (!fn) {
-      return answerCallbackQuery(q.id, 'اکشن نامعتبر است.', false);
-    }
-
-    const result = fn(user);
-    await answerCallbackQuery(q.id, result.text, true);
-    return editMessageText(chatId, messageId, result.text, mainMenu());
-  } catch (err) {
-    logError(err, 'onCallback');
-    try {
-      await answerCallbackQuery(q.id, 'خطای داخلی', true);
-    } catch {}
-  }
-}
-
-/* =========================
-   START SERVER
-========================= */
-async function start() {
-  loadData();
-  startAutosave(30000);
-
-  process.on('unhandledRejection', err => logError(err, 'unhandledRejection'));
-  process.on('uncaughtException', err => logError(err, 'uncaughtException'));
-  process.on('SIGINT', () => {
-    saveData();
-    process.exit(0);
-  });
-  process.on('SIGTERM', () => {
-    saveData();
-    process.exit(0);
-  });
-
-  const app = express();
-  app.use(express.json({ limit: '2mb' }));
-
-  app.get('/', (_, res) => {
-    res.send('OK');
-  });
-
-  app.post(`/webhook/${CONFIG.TOKEN}`, async (req, res) => {
-    try {
-      const update = req.body;
-      res.sendStatus(200);
-
-      if (update.message) await onMessage(update.message);
-      if (update.callback_query) await onCallback(update.callback_query);
-    } catch (err) {
-      logError(err, 'webhook');
-      try { res.sendStatus(200); } catch {}
-    }
-  });
-
-  app.listen(CONFIG.PORT, async () => {
-    console.log(`Bot running on port ${CONFIG.PORT}`);
-
-    if (CONFIG.WEBHOOK_URL) {
       try {
-        const webhook = `${CONFIG.WEBHOOK_URL}/webhook/${CONFIG.TOKEN}`;
-        const result = await setWebhook(webhook);
-        console.log('Webhook set:', result);
-      } catch (err) {
-        logError(err, 'setWebhook');
+        await sendMessage(
+          targetUserId,
+          `🎁 ادمین بهت ${amount}$ پول داد.
+💰 موجودی فعلی: ${targetUser.money}$`
+        );
+      } catch (e) {
+        console.error('خطا در ارسال پیام به کاربر:', e);
+      }
+
+      return res.sendStatus(200);
+    }
+
+    // =========================
+    // START
+    // =========================
+    if (text === '/start') {
+      await sendMessage(
+        chatId,
+        `سلام 👋
+به شبیه‌ساز زندگی خوش اومدی.
+
+${statusText(user)}
+یکی از بخش‌ها رو انتخاب کن:`,
+        mainMenu
+      );
+      return res.sendStatus(200);
+    }
+
+    if (!callback_query) return res.sendStatus(200);
+
+    const data = callback_query.data;
+
+    // =========================
+    // MAIN / REFRESH
+    // =========================
+    if (data === 'main' || data === 'refresh') {
+      await sendMessage(chatId, `${statusText(user)}\nیکی از گزینه‌ها را انتخاب کن:`, mainMenu);
+    }
+
+    // =========================
+    // WORK
+    // =========================
+    else if (data === 'work_menu') {
+      await sendMessage(chatId, `${statusText(user)}\nیک شغل انتخاب کن:`, [
+        [{ text: '🔨 کارگری (+20 | -10❤️ | +10XP)', callback_data: 'work_simple' }],
+        [{ text: '💻 کار اداری (+35 | -15❤️ | +15XP)', callback_data: 'work_office' }],
+        [{ text: '🚕 رانندگی (+25 | -12❤️ | +12XP)', callback_data: 'work_driver' }],
+        ...back
+      ]);
+    }
+
+    else if (data === 'work_simple') {
+      if (user.health < 10) {
+        await sendMessage(chatId, '😵 خسته‌ای، اول استراحت کن.', mainMenu);
+        return res.sendStatus(200);
+      }
+
+      user.job = 'کارگر';
+      const up = reward(user, 20 + user.level * 2, 10, -10);
+      let txt = '✅ کارگری کردی.';
+
+      if (Math.random() < 0.12) {
+        user.money += 30;
+        txt += '\n🎁 پاداش گرفتی: 30$';
+      }
+
+      if (up) txt += `\n🎉 لول آپ! لول ${user.level}`;
+
+      clamp(user);
+      await sendMessage(chatId, `${txt}\n\n${statusText(user)}`, mainMenu);
+    }
+
+    else if (data === 'work_office') {
+      if (user.health < 15) {
+        await sendMessage(chatId, '😵 انرژی کافی نداری.', mainMenu);
+        return res.sendStatus(200);
+      }
+
+      user.job = 'کارمند';
+      const up = reward(user, 35 + user.level * 3, 15, -15);
+      let txt = '✅ کار اداری انجام دادی.';
+
+      if (Math.random() < 0.1) {
+        user.money += 50;
+        txt += '\n📈 پاداش عملکرد: 50$';
+      }
+
+      if (up) txt += `\n🎉 لول آپ! لول ${user.level}`;
+
+      clamp(user);
+      await sendMessage(chatId, `${txt}\n\n${statusText(user)}`, mainMenu);
+    }
+
+    else if (data === 'work_driver') {
+      if (user.health < 12) {
+        await sendMessage(chatId, '🚫 خیلی خسته‌ای برای رانندگی.', mainMenu);
+        return res.sendStatus(200);
+      }
+
+      user.job = 'راننده';
+      const up = reward(user, 25 + user.level * 2, 12, -12);
+      let txt = '✅ رانندگی کردی.';
+
+      if (Math.random() < 0.08) {
+        user.money -= 20;
+        txt += '\n🚓 جریمه شدی: 20$';
+      }
+
+      if (up) txt += `\n🎉 لول آپ! لول ${user.level}`;
+
+      clamp(user);
+      await sendMessage(chatId, `${txt}\n\n${statusText(user)}`, mainMenu);
+    }
+
+    // =========================
+    // FUN
+    // =========================
+    else if (data === 'fun_menu') {
+      await sendMessage(chatId, `${statusText(user)}\nتفریح انتخاب کن:`, [
+        [{ text: '🎬 سینما (-30$ | +15❤️)', callback_data: 'fun_movie' }],
+        [{ text: '🚶 پیاده‌روی (+10❤️)', callback_data: 'fun_walk' }],
+        [{ text: '🎵 موسیقی (+5❤️)', callback_data: 'fun_music' }],
+        ...back
+      ]);
+    }
+
+    else if (data === 'fun_movie') {
+      if (user.money < 30) {
+        await sendMessage(chatId, '💸 پول کافی نداری.', mainMenu);
+        return res.sendStatus(200);
+      }
+
+      user.money -= 30;
+      user.health += 15;
+      clamp(user);
+
+      await sendMessage(chatId, `🍿 سینما رفتی.\n\n${statusText(user)}`, mainMenu);
+    }
+
+    else if (data === 'fun_walk') {
+      user.health += 10;
+      let txt = '🚶 پیاده‌روی کردی.';
+
+      if (Math.random() < 0.15) {
+        user.money += 10;
+        txt += '\n💵 10$ پیدا کردی!';
+      }
+
+      clamp(user);
+      await sendMessage(chatId, `${txt}\n\n${statusText(user)}`, mainMenu);
+    }
+
+    else if (data === 'fun_music') {
+      user.health += 5;
+      clamp(user);
+      await sendMessage(chatId, `🎵 موسیقی گوش دادی.\n\n${statusText(user)}`, mainMenu);
+    }
+
+    // =========================
+    // FAMILY
+    // =========================
+    else if (data === 'family_menu') {
+      await sendMessage(chatId, `${statusText(user)}\nبخش خانواده:`, [
+        [{ text: '📞 تماس (+10 عشق)', callback_data: 'family_call' }],
+        [{ text: '🍽 شام (-20$ | +20 عشق | +5❤️)', callback_data: 'family_dinner' }],
+        [{ text: '🧸 وقت با بچه‌ها (+15 عشق)', callback_data: 'family_kids_time' }],
+        ...back
+      ]);
+    }
+
+    else if (data === 'family_call') {
+      user.familyLove += 10;
+      clamp(user);
+      await sendMessage(chatId, `📞 تماس گرفتی.\n\n${statusText(user)}`, mainMenu);
+    }
+
+    else if (data === 'family_dinner') {
+      if (user.money < 20) {
+        await sendMessage(chatId, '💸 پول کافی نداری.', mainMenu);
+        return res.sendStatus(200);
+      }
+
+      user.money -= 20;
+      user.familyLove += 20;
+      user.health += 5;
+      clamp(user);
+
+      await sendMessage(chatId, `🍽 شام خانوادگی.\n\n${statusText(user)}`, mainMenu);
+    }
+
+    else if (data === 'family_kids_time') {
+      if (user.children <= 0) {
+        await sendMessage(chatId, '👶 بچه‌ای نداری.', mainMenu);
+        return res.sendStatus(200);
+      }
+
+      user.familyLove += 15;
+      user.health += 5;
+      clamp(user);
+
+      await sendMessage(chatId, `🧸 با بچه‌ها وقت گذروندی.\n\n${statusText(user)}`, mainMenu);
+    }
+
+    // =========================
+    // MARRIAGE
+    // =========================
+    else if (data === 'marriage_menu') {
+      await sendMessage(chatId, `${statusText(user)}\nازدواج و بچه:`, [
+        [{ text: '💘 آشنایی (-20$)', callback_data: 'find_partner' }],
+        [{ text: '💍 ازدواج (-100$)', callback_data: 'get_married' }],
+        [{ text: '👶 بچه‌دار شدن (-50$)', callback_data: 'have_child' }],
+        ...back
+      ]);
+    }
+
+    else if (data === 'find_partner') {
+      if (user.married) {
+        await sendMessage(chatId, '💍 قبلاً ازدواج کردی.', mainMenu);
+        return res.sendStatus(200);
+      }
+
+      if (user.money < 20) {
+        await sendMessage(chatId, '💸 پول کافی نداری.', mainMenu);
+        return res.sendStatus(200);
+      }
+
+      const names = ['سارا', 'نگار', 'بهار', 'رها', 'امیر', 'علی', 'محمد', 'آرزو'];
+      const name = names[Math.floor(Math.random() * names.length)];
+
+      user.money -= 20;
+      user.spouse = name;
+      user.familyLove += 10;
+      clamp(user);
+
+      await sendMessage(chatId, `💘 با ${name} آشنا شدی.\n\n${statusText(user)}`, mainMenu);
+    }
+
+    else if (data === 'get_married') {
+      if (user.married) {
+        await sendMessage(chatId, '💍 قبلاً ازدواج کردی.', mainMenu);
+        return res.sendStatus(200);
+      }
+
+      if (!user.spouse) {
+        await sendMessage(chatId, 'اول باید آشنا بشی.', mainMenu);
+        return res.sendStatus(200);
+      }
+
+      if (user.money < 100) {
+        await sendMessage(chatId, '💸 پول کافی برای ازدواج نداری.', mainMenu);
+        return res.sendStatus(200);
+      }
+
+      user.money -= 100;
+      user.married = true;
+      user.familyLove += 25;
+      clamp(user);
+
+      await sendMessage(chatId, `🎉 ازدواج کردی با ${user.spouse}!\n\n${statusText(user)}`, mainMenu);
+    }
+
+    else if (data === 'have_child') {
+      if (!user.married) {
+        await sendMessage(chatId, 'اول باید ازدواج کنی.', mainMenu);
+        return res.sendStatus(200);
+      }
+
+      if (user.money < 50) {
+        await sendMessage(chatId, '💸 پول کافی نداری.', mainMenu);
+        return res.sendStatus(200);
+      }
+
+      user.money -= 50;
+      user.children += 1;
+      user.familyLove += 20;
+      clamp(user);
+
+      await sendMessage(chatId, `👶 بچه‌دار شدی!\n\n${statusText(user)}`, mainMenu);
+    }
+
+    // =========================
+    // HOUSE
+    // =========================
+    else if (data === 'house_menu') {
+      await sendMessage(chatId, `${statusText(user)}\nبخش خانه:`, [
+        [{ text: '🏚 اجاره کوچک (-40$)', callback_data: 'rent_small_house' }],
+        [{ text: '🏠 خرید معمولی (-200$)', callback_data: 'buy_normal_house' }],
+        [{ text: '🏡 خرید ویلا (-500$)', callback_data: 'buy_villa' }],
+        ...back
+      ]);
+    }
+
+    else if (data === 'rent_small_house') {
+      if (user.money < 40) {
+        await sendMessage(chatId, '💸 پول کافی نداری.', mainMenu);
+        return res.sendStatus(200);
+      }
+
+      user.money -= 40;
+      user.house = 'خانه کوچک اجاره‌ای';
+      user.familyLove += 5;
+      clamp(user);
+
+      await sendMessage(chatId, `🏚 خانه اجاره کردی.\n\n${statusText(user)}`, mainMenu);
+    }
+
+    else if (data === 'buy_normal_house') {
+      if (user.money < 200) {
+        await sendMessage(chatId, '💸 پول کافی نداری.', mainMenu);
+        return res.sendStatus(200);
+      }
+
+      user.money -= 200;
+      user.house = 'خانه معمولی';
+      user.familyLove += 15;
+      clamp(user);
+
+      await sendMessage(chatId, `🏠 خانه خریدی.\n\n${statusText(user)}`, mainMenu);
+    }
+
+    else if (data === 'buy_villa') {
+      if (user.money < 500) {
+        await sendMessage(chatId, '💸 پول کافی نداری.', mainMenu);
+        return res.sendStatus(200);
+      }
+
+      user.money -= 500;
+      user.house = 'ویلای بزرگ';
+      user.familyLove += 30;
+      clamp(user);
+
+      await sendMessage(chatId, `🏡 ویلا خریدی.\n\n${statusText(user)}`, mainMenu);
+    }
+
+    // =========================
+    // CAR
+    // =========================
+    else if (data === 'car_menu') {
+      await sendMessage(chatId, `${statusText(user)}\nماشین:`, [
+        [{ text: '🚗 خرید ماشین معمولی (-150$)', callback_data: 'buy_car_normal' }],
+        [{ text: '🚙 خرید ماشین خوب (-350$)', callback_data: 'buy_car_good' }],
+        [{ text: '🏎 ماشین لوکس (-800$)', callback_data: 'buy_car_luxury' }],
+        ...back
+      ]);
+    }
+
+    else if (data === 'buy_car_normal') {
+      if (user.money < 150) {
+        await sendMessage(chatId, '💸 پول کافی نداری.', mainMenu);
+        return res.sendStatus(200);
+      }
+
+      user.money -= 150;
+      user.car = 'ماشین معمولی';
+      clamp(user);
+
+      await sendMessage(chatId, `🚗 ماشین خریدی.\n\n${statusText(user)}`, mainMenu);
+    }
+
+    else if (data === 'buy_car_good') {
+      if (user.money < 350) {
+        await sendMessage(chatId, '💸 پول کافی نداری.', mainMenu);
+        return res.sendStatus(200);
+      }
+
+      user.money -= 350;
+      user.car = 'ماشین خوب';
+      clamp(user);
+
+      await sendMessage(chatId, `🚙 ماشین خوب خریدی.\n\n${statusText(user)}`, mainMenu);
+    }
+
+    else if (data === 'buy_car_luxury') {
+      if (user.money < 800) {
+        await sendMessage(chatId, '💸 پول کافی نداری.', mainMenu);
+        return res.sendStatus(200);
+      }
+
+      user.money -= 800;
+      user.car = 'ماشین لوکس';
+      clamp(user);
+
+      await sendMessage(chatId, `🏎 ماشین لوکس خریدی.\n\n${statusText(user)}`, mainMenu);
+    }
+
+    // =========================
+    // EDUCATION
+    // =========================
+    else if (data === 'edu_menu') {
+      await sendMessage(chatId, `${statusText(user)}\nتحصیل:`, [
+        [{ text: '📘 مدرسه (+10XP)', callback_data: 'edu_school' }],
+        [{ text: '🎓 دانشگاه (-100$ | +30XP)', callback_data: 'edu_university' }],
+        [{ text: '📚 دوره تخصصی (-50$ | +20XP)', callback_data: 'edu_course' }],
+        ...back
+      ]);
+    }
+
+    else if (data === 'edu_school') {
+      user.education = 'دیپلم';
+      reward(user, 0, 10, 0);
+      await sendMessage(chatId, `📘 به مدرسه رفتی.\n\n${statusText(user)}`, mainMenu);
+    }
+
+    else if (data === 'edu_university') {
+      if (user.money < 100) {
+        await sendMessage(chatId, '💸 پول کافی نداری.', mainMenu);
+        return res.sendStatus(200);
+      }
+
+      user.money -= 100;
+      user.education = 'دانشگاهی';
+      reward(user, 0, 30, 0);
+
+      await sendMessage(chatId, `🎓 دانشگاه رفتی.\n\n${statusText(user)}`, mainMenu);
+    }
+
+    else if (data === 'edu_course') {
+      if (user.money < 50) {
+        await sendMessage(chatId, '💸 پول کافی نداری.', mainMenu);
+        return res.sendStatus(200);
+      }
+
+      user.money -= 50;
+      user.education = 'دوره تخصصی';
+      reward(user, 0, 20, 0);
+
+      await sendMessage(chatId, `📚 دوره تخصصی گذروندی.\n\n${statusText(user)}`, mainMenu);
+    }
+
+    // =========================
+    // BANK
+    // =========================
+    else if (data === 'bank_menu') {
+      await sendMessage(chatId, `${statusText(user)}\nبانک:`, [
+        [{ text: '💵 واریز به بانک', callback_data: 'bank_deposit' }, { text: '💸 برداشت از بانک', callback_data: 'bank_withdraw' }],
+        ...back
+      ]);
+    }
+
+    else if (data === 'bank_deposit') {
+      const amount = Math.min(50, user.money);
+
+      if (amount <= 0) {
+        await sendMessage(chatId, 'پول نقدی نداری.', mainMenu);
+        return res.sendStatus(200);
+      }
+
+      user.money -= amount;
+      user.bank += amount;
+      clamp(user);
+
+      await sendMessage(chatId, `💵 ${amount}$ به بانک واریز شد.\n\n${statusText(user)}`, mainMenu);
+    }
+
+    else if (data === 'bank_withdraw') {
+      const amount = Math.min(50, user.bank);
+
+      if (amount <= 0) {
+        await sendMessage(chatId, 'موجودی بانک نداری.', mainMenu);
+        return res.sendStatus(200);
+      }
+
+      user.bank -= amount;
+      user.money += amount;
+      clamp(user);
+
+      await sendMessage(chatId, `💸 ${amount}$ از بانک برداشت شد.\n\n${statusText(user)}`, mainMenu);
+    }
+
+    // =========================
+    // BUSINESS
+    // =========================
+    else if (data === 'biz_menu') {
+      await sendMessage(chatId, `${statusText(user)}\nکسب‌وکار:`, [
+        [{ text: '🏪 مغازه کوچک (-200$)', callback_data: 'biz_shop' }],
+        [{ text: '🏬 شرکت متوسط (-500$)', callback_data: 'biz_company' }],
+        ...back
+      ]);
+    }
+
+    else if (data === 'biz_shop') {
+      if (user.money < 200) {
+        await sendMessage(chatId, '💸 پول کافی نداری.', mainMenu);
+        return res.sendStatus(200);
+      }
+
+      user.money -= 200;
+      user.business = 'مغازه کوچک';
+      reward(user, 0, 25, 0);
+
+      await sendMessage(chatId, `🏪 مغازه باز کردی.\n\n${statusText(user)}`, mainMenu);
+    }
+
+    else if (data === 'biz_company') {
+      if (user.money < 500) {
+        await sendMessage(chatId, '💸 پول کافی نداری.', mainMenu);
+        return res.sendStatus(200);
+      }
+
+      user.money -= 500;
+      user.business = 'شرکت متوسط';
+      reward(user, 0, 50, 0);
+
+      await sendMessage(chatId, `🏬 شرکت راه انداختی.\n\n${statusText(user)}`, mainMenu);
+    }
+
+    // =========================
+    // CRIME
+    // =========================
+    else if (data === 'crime_menu') {
+      await sendMessage(chatId, `${statusText(user)}\nجرم و زندان:`, [
+        [{ text: '😈 دزدی (+40$ | خطر زندان)', callback_data: 'steal' }],
+        [{ text: '🚔 تسلیم پلیس', callback_data: 'surrender' }],
+        ...back
+      ]);
+    }
+
+    else if (data === 'steal') {
+      if (Math.random() < 0.45) {
+        user.money += 40;
+        user.criminal = true;
+
+        let txt = '😈 دزدی موفق بودی و 40$ گرفتی.';
+
+        if (Math.random() < 0.5) {
+          user.jailTurns = 2;
+          txt += '\n🚔 گیر افتادی و رفتی زندان!';
+        }
+
+        clamp(user);
+        await sendMessage(chatId, `${txt}\n\n${statusText(user)}`, mainMenu);
+      } else {
+        user.criminal = true;
+        user.jailTurns = 2;
+        clamp(user);
+        await sendMessage(chatId, `🚔 دزدی ناموفق بود و دستگیر شدی.\n\n${statusText(user)}`, mainMenu);
       }
     }
-  });
-}
 
-start();
+    else if (data === 'surrender') {
+      if (user.criminal) {
+        user.jailTurns = 1;
+        clamp(user);
+        await sendMessage(chatId, `🚔 خودت را تسلیم کردی.\n\n${statusText(user)}`, mainMenu);
+      } else {
+        await sendMessage(chatId, 'تو خلافکار نیستی.', mainMenu);
+      }
+    }
+
+    // =========================
+    // MAFIA
+    // =========================
+    else if (data === 'mafia_menu') {
+      await sendMessage(chatId, `${statusText(user)}\nمافیا:`, [
+        [{ text: '🕶 ورود به مافیا (-100$)', callback_data: 'join_mafia' }],
+        [{ text: '💣 مأموریت مافیا', callback_data: 'mafia_mission' }],
+        ...back
+      ]);
+    }
+
+    else if (data === 'join_mafia') {
+      if (user.money < 100) {
+        await sendMessage(chatId, '💸 برای ورود به مافیا 100$ لازم داری.', mainMenu);
+        return res.sendStatus(200);
+      }
+
+      user.money -= 100;
+      user.mafiaJoined = true;
+      user.mafiaRank = 'عضو';
+      user.criminal = true;
+      clamp(user);
+
+      await sendMessage(chatId, `🕶 وارد مافیا شدی!\n\n${statusText(user)}`, mainMenu);
+    }
+
+    else if (data === 'mafia_mission') {
+      if (!user.mafiaJoined) {
+        await sendMessage(chatId, 'اول باید عضو مافیا بشی.', mainMenu);
+        return res.sendStatus(200);
+      }
+
+      const win = Math.random() < 0.6;
+
+      if (win) {
+        user.money += 120;
+        user.xp += 30;
+
+        if (Math.random() < 0.2) {
+          user.health -= 10;
+        }
+
+        let txt = '💣 مأموریت موفق بود و 120$ گرفتی.';
+
+        if (levelUp(user)) {
+          txt += `\n🎉 لول آپ!`;
+        }
+
+        clamp(user);
+        await sendMessage(chatId, `${txt}\n\n${statusText(user)}`, mainMenu);
+      } else {
+        user.jailTurns = 2;
+        user.criminal = true;
+        clamp(user);
+        await sendMessage(chatId, `🚔 مأموریت لو رفت و رفتی زندان.\n\n${statusText(user)}`, mainMenu);
+      }
+    }
+
+    // =========================
+    // HOSPITAL
+    // =========================
+    else if (data === 'hospital') {
+      if (user.money < 50) {
+        await sendMessage(chatId, '?? هزینه بیمارستان 50$ است.', mainMenu);
+        return res.sendStatus(200);
+      }
+
+      user.money -= 50;
+      user.health = 100;
+      clamp(user);
+
+      await sendMessage(chatId, `🏥 درمان شدی.\n\n${statusText(user)}`, mainMenu);
+    }
+
+    else {
+      await sendMessage(chatId, '❓ گزینه نامعتبر است.', mainMenu);
+    }
+
+    return res.sendStatus(200);
+  } catch (err) {
+    console.error('Webhook error:', err);
+    return res.sendStatus(500);
+  }
+});
+
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`✅ Webhook path: /webhook/${SECRET_PATH}`);
+});
