@@ -1,886 +1,1647 @@
-import express from 'express';
+import 'dotenv/config'
+import express from 'express'
 
-const app = express();
-app.use(express.json());
+const app = express()
+app.use(express.json())
 
-const BOT_TOKEN = process.env.BOT_TOKEN;
-const SECRET_PATH = process.env.SECRET_PATH || 'my-secret-life-bot';
-const ADMIN_ID = '5576592239';
-const PORT = process.env.PORT || 3000;
+const BOT_TOKEN = process.env.BOT_TOKEN
+const SECRET_PATH = process.env.SECRET_PATH || 'webhook'
+const PORT = process.env.PORT || 3000
+const ADMIN_ID = process.env.ADMIN_ID || '5576592239'
 
 if (!BOT_TOKEN) {
-  console.error('❌ BOT_TOKEN تنظیم نشده');
-  process.exit(1);
+  throw new Error('BOT_TOKEN تنظیم نشده')
 }
 
-const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
+const API = `https://api.telegram.org/bot${BOT_TOKEN}`
 
 // =========================
 // RAM STORAGE
 // =========================
-const users = new Map();
+const users = new Map()
 
-function getUser(chatId) {
-  if (!users.has(chatId)) {
-    users.set(chatId, {
-      money: 100,
-      bank: 0,
-      health: 100,
-      xp: 0,
-      level: 1,
-      job: 'بیکار',
-      education: 'ندارد',
-      married: false,
-      spouse: null,
-      house: null,
-      car: null,
-      children: 0,
-      familyLove: 50,
-      business: null,
-      criminal: false,
-      jailTurns: 0,
-      mafiaJoined: false,
-      mafiaRank: null
-    });
+function createUser(id, name = 'بازیکن') {
+  return {
+    id: String(id),
+    name,
+
+    money: 500000, // تومان
+    bank: 0,
+    debt: 0,
+
+    health: 100,
+    energy: 100,
+    happiness: 70,
+
+    xp: 0,
+    level: 1,
+    age: 18,
+
+    job: 'بیکار',
+    education: 'بی‌سواد',
+    married: false,
+    partner: null,
+    children: 0,
+    familyLove: 40,
+
+    house: 'ندارد',
+    car: 'ندارد',
+    business: 'ندارد',
+
+    mafia: false,
+    crimeLevel: 0,
+    jailTurns: 0,
+
+    lastWork: 0,
+    lastFun: 0,
+    lastStudy: 0,
+    lastCrime: 0,
+    lastFamily: 0,
+    lastMafia: 0,
+
+    inventory: [],
+    createdAt: Date.now()
   }
-  return users.get(chatId);
 }
 
-function isAdmin(userId) {
-  return String(userId) === ADMIN_ID;
+function getUser(id, name = 'بازیکن') {
+  const userId = String(id)
+  if (!users.has(userId)) {
+    users.set(userId, createUser(userId, name))
+  }
+  return users.get(userId)
 }
 
 function clamp(user) {
-  user.money = Math.max(0, Math.floor(user.money));
-  user.bank = Math.max(0, Math.floor(user.bank));
-  user.health = Math.max(0, Math.min(100, Math.floor(user.health)));
-  user.familyLove = Math.max(0, Math.min(100, Math.floor(user.familyLove)));
-  user.xp = Math.max(0, Math.floor(user.xp));
-  user.level = Math.max(1, Math.floor(user.level));
-  user.children = Math.max(0, Math.floor(user.children));
-  user.jailTurns = Math.max(0, Math.floor(user.jailTurns));
+  user.money = Math.max(0, user.money || 0)
+  user.bank = Math.max(0, user.bank || 0)
+  user.debt = Math.max(0, user.debt || 0)
+
+  user.health = Math.max(0, Math.min(100, user.health || 0))
+  user.energy = Math.max(0, Math.min(100, user.energy || 0))
+  user.happiness = Math.max(0, Math.min(100, user.happiness || 0))
+
+  user.xp = Math.max(0, user.xp || 0)
+  user.level = Math.max(1, user.level || 1)
+  user.age = Math.max(18, user.age || 18)
+  user.children = Math.max(0, user.children || 0)
+  user.familyLove = Math.max(0, Math.min(100, user.familyLove || 0))
+  user.crimeLevel = Math.max(0, user.crimeLevel || 0)
+  user.jailTurns = Math.max(0, user.jailTurns || 0)
+
+  return user
 }
 
-function statusText(user) {
-  return `📊 *وضعیت شما*
-💰 پول نقد: ${user.money}$
-🏦 بانک: ${user.bank}$
-❤️ سلامتی: ${user.health}%
-⭐ لول: ${user.level}
-🧠 XP: ${user.xp}
-💼 شغل: ${user.job}
-🎓 تحصیل: ${user.education}
-💍 تاهل: ${user.married ? `متاهل با ${user.spouse}` : 'مجرد'}
-🏠 خانه: ${user.house || 'ندارد'}
-🚗 ماشین: ${user.car || 'ندارد'}
-👶 بچه: ${user.children}
-👨‍👩‍👧 عشق خانوادگی: ${user.familyLove}%
-🏢 کسب‌وکار: ${user.business || 'ندارد'}
-🚔 وضعیت جرم: ${user.criminal ? 'خلافکار' : 'سالم'}
-🔒 زندان: ${user.jailTurns > 0 ? `${user.jailTurns} نوبت` : 'آزاد'}
-🕴 مافیا: ${user.mafiaJoined ? `عضو (${user.mafiaRank || 'عضو'})` : 'عضو نیست'}
-━━━━━━━━━━━━━━`;
+function addXP(user, amount) {
+  user.xp += amount
+  while (user.xp >= user.level * 120) {
+    user.xp -= user.level * 120
+    user.level += 1
+    user.money += 50000
+  }
+  clamp(user)
 }
 
-async function tg(method, payload) {
-  const response = await fetch(`${TELEGRAM_API}/${method}`, {
+function isAdmin(userId) {
+  return String(userId) === String(ADMIN_ID)
+}
+
+function formatMoney(amount) {
+  return `${Number(amount).toLocaleString('en-US')} تومان`
+}
+
+function cooldownLeft(lastTime, seconds) {
+  const passed = Math.floor((Date.now() - lastTime) / 1000)
+  return Math.max(0, seconds - passed)
+}
+
+function prettyCooldown(sec) {
+  if (sec < 60) return `${sec} ثانیه`
+  const m = Math.floor(sec / 60)
+  const s = sec % 60
+  return `${m} دقیقه و ${s} ثانیه`
+}
+
+function statusBar(label, value, max = 100) {
+  const filled = Math.round((value / max) * 10)
+  const empty = 10 - filled
+  return `${label}: ${'🟩'.repeat(filled)}${'⬜'.repeat(empty)} ${value}/${max}`
+}
+
+function mainMenu() {
+  return {
+    inline_keyboard: [
+      [{ text: '📊 وضعیت من', callback_data: 'profile' }],
+      [{ text: '💼 کار', callback_data: 'work_menu' }, { text: '🎉 تفریح', callback_data: 'fun_menu' }],
+      [{ text: '👨‍👩‍👧 خانواده', callback_data: 'family_menu' }, { text: '💍 ازدواج', callback_data: 'marriage_menu' }],
+      [{ text: '🏠 خانه', callback_data: 'house_menu' }, { text: '🚗 ماشین', callback_data: 'car_menu' }],
+      [{ text: '🎓 تحصیل', callback_data: 'edu_menu' }, { text: '🏦 بانک', callback_data: 'bank_menu' }],
+      [{ text: '🏢 کسب‌وکار', callback_data: 'biz_menu' }, { text: '🕵️ جرم', callback_data: 'crime_menu' }],
+      [{ text: '🖤 مافیا', callback_data: 'mafia_menu' }, { text: '🏥 بیمارستان', callback_data: 'hospital' }],
+      [{ text: '🔄 تازه‌سازی', callback_data: 'refresh_main' }]
+    ]
+  }
+}
+
+function backButton() {
+  return { inline_keyboard: [[{ text: '⬅️ بازگشت', callback_data: 'back_main' }]] }
+}
+
+function combineButtons(rows) {
+  return { inline_keyboard: [...rows, [{ text: '⬅️ بازگشت', callback_data: 'back_main' }]] }
+}
+
+function profileText(user) {
+  return `
+🎮 <b>پروفایل زندگی ${user.name}</b>
+
+💵 پول نقد: <b>${formatMoney(user.money)}</b>
+🏦 موجودی بانک: <b>${formatMoney(user.bank)}</b>
+📉 بدهی: <b>${formatMoney(user.debt)}</b>
+
+❤️ سلامتی: <b>${user.health}</b>/100
+⚡ انرژی: <b>${user.energy}</b>/100
+😄 خوشحالی: <b>${user.happiness}</b>/100
+
+⭐ XP: <b>${user.xp}</b>
+🏅 لِول: <b>${user.level}</b>
+🎂 سن: <b>${user.age}</b>
+
+💼 شغل: <b>${user.job}</b>
+🎓 تحصیلات: <b>${user.education}</b>
+
+💍 ازدواج: <b>${user.married ? `متأهل با ${user.partner}` : 'مجرد'}</b>
+👶 تعداد بچه: <b>${user.children}</b>
+❤️‍🔥 عشق خانوادگی: <b>${user.familyLove}</b>/100
+
+🏠 خانه: <b>${user.house}</b>
+🚗 ماشین: <b>${user.car}</b>
+🏢 کسب‌وکار: <b>${user.business}</b>
+
+🖤 عضو مافیا: <b>${user.mafia ? 'بله' : 'خیر'}</b>
+🕵️ سطح جرم: <b>${user.crimeLevel}</b>
+🚔 نوبت زندان: <b>${user.jailTurns}</b>
+
+${statusBar('سلامتی', user.health)}
+${statusBar('انرژی', user.energy)}
+${statusBar('خوشحالی', user.happiness)}
+`.trim()
+}
+
+async function tg(method, body) {
+  const res = await fetch(`${API}/${method}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload)
-  });
-  return response.json();
+    body: JSON.stringify(body)
+  })
+  return res.json()
 }
 
-async function sendMessage(chatId, text, keyboard = null) {
+async function sendMessage(chatId, text, extra = {}) {
   return tg('sendMessage', {
     chat_id: chatId,
     text,
-    parse_mode: 'Markdown',
-    reply_markup: keyboard ? { inline_keyboard: keyboard } : undefined
-  });
+    parse_mode: 'HTML',
+    ...extra
+  })
 }
 
-async function answerCallbackQuery(callbackQueryId) {
+async function editMessage(chatId, messageId, text, extra = {}) {
+  return tg('editMessageText', {
+    chat_id: chatId,
+    message_id: messageId,
+    text,
+    parse_mode: 'HTML',
+    ...extra
+  })
+}
+
+async function answerCallbackQuery(callbackId, text = '') {
   return tg('answerCallbackQuery', {
-    callback_query_id: callbackQueryId
-  });
+    callback_query_id: callbackId,
+    text,
+    show_alert: false
+  })
 }
 
-function levelUp(user) {
-  const need = user.level * 50;
-  if (user.xp >= need) {
-    user.xp -= need;
-    user.level++;
-    return true;
+function safeName(user) {
+  return user?.first_name || user?.username || 'بازیکن'
+}
+
+function applyNeedDecay(user, energyLoss = 0, healthLoss = 0, happinessLoss = 0) {
+  user.energy -= energyLoss
+  user.health -= healthLoss
+  user.happiness -= happinessLoss
+  clamp(user)
+}
+
+function canAct(user) {
+  if (user.jailTurns > 0) {
+    return { ok: false, msg: `🚔 شما در زندان هستید. ${user.jailTurns} نوبت دیگر باقی مانده.` }
   }
-  return false;
-}
-
-function reward(user, money, xp, health = 0) {
-  user.money += money;
-  user.xp += xp;
-  user.health += health;
-  const up = levelUp(user);
-  clamp(user);
-  return up;
-}
-
-function punishment(user, money, health = 0) {
-  user.money -= money;
-  user.health -= health;
-  clamp(user);
+  if (user.health <= 10) {
+    return { ok: false, msg: '🏥 سلامتی شما خیلی پایین است. اول درمان کن.' }
+  }
+  if (user.energy <= 5) {
+    return { ok: false, msg: '⚡ انرژی شما خیلی کم است. کمی تفریح یا استراحت لازم داری.' }
+  }
+  return { ok: true }
 }
 
 // =========================
 // MENUS
 // =========================
-const mainMenu = [
-  [{ text: '💼 کار', callback_data: 'work_menu' }, { text: '🎡 تفریح', callback_data: 'fun_menu' }],
-  [{ text: '👨‍👩‍👧 خانواده', callback_data: 'family_menu' }, { text: '💍 ازدواج', callback_data: 'marriage_menu' }],
-  [{ text: '🏠 خانه', callback_data: 'house_menu' }, { text: '🚗 ماشین', callback_data: 'car_menu' }],
-  [{ text: '🎓 تحصیل', callback_data: 'edu_menu' }, { text: '🏦 بانک', callback_data: 'bank_menu' }],
-  [{ text: '🏢 کسب‌وکار', callback_data: 'biz_menu' }, { text: '🚔 جرم و زندان', callback_data: 'crime_menu' }],
-  [{ text: '🕴 مافیا', callback_data: 'mafia_menu' }, { text: '🏥 بیمارستان', callback_data: 'hospital' }],
-  [{ text: '🔄 تازه‌سازی', callback_data: 'refresh' }]
-];
+function workMenuText() {
+  return `
+💼 <b>منوی کار</b>
 
-const back = [[{ text: '🔙 بازگشت', callback_data: 'main' }]];
+شغل و تلاش، منبع اصلی درآمد تو هستند.
+هر کار:
+- مقداری <b>تومان</b> می‌دهد
+- کمی <b>XP</b> می‌دهد
+- مقداری از <b>انرژی</b> و گاهی سلامتی کم می‌کند
+
+کارهای موجود:
+🔨 کارگری
+🏢 کار اداری
+🚕 رانندگی
+💻 فریلنسری
+`.trim()
+}
+
+function funMenuText() {
+  return `
+🎉 <b>منوی تفریح</b>
+
+تفریح باعث بالا رفتن:
+- خوشحالی
+- انرژی
+- گاهی سلامتی
+
+انتخاب‌ها:
+🎬 سینما
+🎵 موسیقی
+🌳 پارک
+🛌 استراحت
+`.trim()
+}
+
+function familyMenuText() {
+  return `
+👨‍👩‍👧 <b>منوی خانواده</b>
+
+خانواده روی کیفیت زندگی تو اثر مستقیم دارد.
+این بخش باعث افزایش:
+- عشق خانوادگی
+- خوشحالی
+- گاهی سلامتی
+
+فعالیت‌ها:
+📞 تماس با خانواده
+🍽 شام خانوادگی
+🎁 خرید هدیه
+👶 وقت با بچه‌ها
+`.trim()
+}
+
+function marriageMenuText(user) {
+  return `
+💍 <b>منوی ازدواج</b>
+
+وضعیت فعلی: <b>${user.married ? `متأهل با ${user.partner}` : 'مجرد'}</b>
+
+گزینه‌ها:
+💕 آشنایی با شریک
+💒 ازدواج
+👶 بچه‌دار شدن
+
+شرایط:
+- برای ازدواج باید اول شریک داشته باشی
+- برای بچه‌دار شدن باید متأهل باشی
+`.trim()
+}
+
+function houseMenuText() {
+  return `
+🏠 <b>منوی خانه</b>
+
+خانه روی پرستیژ و حس پیشرفت زندگی تو اثر دارد.
+
+انتخاب‌ها:
+🏚 اجاره خانه کوچک - 150,000 تومان
+🏠 خرید خانه معمولی - 900,000 تومان
+🏡 خرید ویلای شیک - 3,500,000 تومان
+`.trim()
+}
+
+function carMenuText() {
+  return `
+🚗 <b>منوی ماشین</b>
+
+ماشین یعنی کلاس، راحتی و پیشرفت.
+
+انتخاب‌ها:
+🚙 ماشین اقتصادی - 700,000 تومان
+🚘 ماشین خوب - 2,000,000 تومان
+🏎 ماشین لوکس - 6,000,000 تومان
+`.trim()
+}
+
+function eduMenuText() {
+  return `
+🎓 <b>منوی تحصیل</b>
+
+تحصیل باعث رشد تو می‌شود:
+- XP بیشتر
+- شغل‌های بهتر
+- حس پیشرفت بیشتر
+
+انتخاب‌ها:
+📘 مدرسه - 80,000 تومان
+🎓 دانشگاه - 400,000 تومان
+🧠 دوره تخصصی - 900,000 تومان
+`.trim()
+}
+
+function bankMenuText() {
+  return `
+🏦 <b>منوی بانک</b>
+
+در بانک می‌تونی:
+- پول نقدت را واریز کنی
+- از حساب بانکی برداشت کنی
+- وام بگیری
+- بدهی را تسویه کنی
+
+عملیات سریع بانکی در این نسخه مرحله‌ای هستند.
+`.trim()
+}
+
+function bizMenuText() {
+  return `
+🏢 <b>منوی کسب‌وکار</b>
+
+اگر پول و لِول کافی داشته باشی، می‌تونی کسب‌وکار بخری.
+
+انتخاب‌ها:
+🏪 مغازه کوچک - 1,500,000 تومان
+🏬 فروشگاه متوسط - 5,000,000 تومان
+🏭 شرکت بزرگ - 15,000,000 تومان
+
+کسب‌وکار پرستیژ و درآمد بهتر می‌دهد.
+`.trim()
+}
+
+function crimeMenuText() {
+  return `
+🕵️ <b>منوی جرم</b>
+
+این بخش ریسک بالا و سود بالا دارد.
+ممکن است:
+- پول گیرت بیاید
+- زخمی شوی
+- زندانی شوی
+
+انتخاب‌ها:
+👜 کیف‌قاپی
+🏪 دزدی از مغازه
+🚨 تسلیم پلیس
+`.trim()
+}
+
+function mafiaMenuText(user) {
+  return `
+🖤 <b>منوی مافیا</b>
+
+وضعیت عضویت: <b>${user.mafia ? 'عضو هستی' : 'عضو نیستی'}</b>
+
+اگر عضو مافیا شوی:
+- مأموریت‌های خطرناک‌تر می‌گیری
+- پول بیشتری می‌گیری
+- احتمال زندان هم بیشتر می‌شود
+
+انتخاب‌ها:
+🤝 عضویت در مافیا
+🎯 مأموریت مافیا
+`.trim()
+}
+
+function hospitalText() {
+  return `
+🏥 <b>بیمارستان</b>
+
+در اینجا می‌توانی:
+- درمان کامل بگیری
+- بخشی از انرژی برگردانی
+
+درمان کامل: 120,000 تومان
+`.trim()
+}
+
+// =========================
+// CALLBACK HANDLERS
+// =========================
+async function renderMain(chatId, messageId, user) {
+  const text = `
+🌆 <b>ربات شبیه‌ساز زندگی</b>
+
+به دنیای زندگی واقعی خوش اومدی.
+اینجا باید:
+- کار کنی
+- پول دربیاری
+- درس بخونی
+- خانواده بسازی
+- خانه و ماشین بخری
+- اگر خواستی وارد جرم و مافیا بشی!
+
+💵 واحد پول بازی: <b>تومان</b>
+
+${profileText(user)}
+`.trim()
+
+  if (messageId) {
+    return editMessage(chatId, messageId, text, { reply_markup: mainMenu() })
+  }
+  return sendMessage(chatId, text, { reply_markup: mainMenu() })
+}
+
+async function handleCallback(cq) {
+  const data = cq.data
+  const callbackId = cq.id
+  const chatId = cq.message.chat.id
+  const messageId = cq.message.message_id
+  const user = getUser(cq.from.id, safeName(cq.from))
+
+  clamp(user)
+
+  if (data === 'back_main' || data === 'refresh_main' || data === 'profile') {
+    await answerCallbackQuery(callbackId, 'به‌روزرسانی شد')
+    return renderMain(chatId, messageId, user)
+  }
+
+  if (data === 'work_menu') {
+    await answerCallbackQuery(callbackId)
+    return editMessage(chatId, messageId, workMenuText(), {
+      reply_markup: combineButtons([
+        [{ text: '🔨 کارگری', callback_data: 'work_worker' }],
+        [{ text: '🏢 کار اداری', callback_data: 'work_office' }],
+        [{ text: '🚕 رانندگی', callback_data: 'work_driver' }],
+        [{ text: '💻 فریلنسری', callback_data: 'work_freelance' }]
+      ])
+    })
+  }
+
+  if (data === 'fun_menu') {
+    await answerCallbackQuery(callbackId)
+    return editMessage(chatId, messageId, funMenuText(), {
+      reply_markup: combineButtons([
+        [{ text: '🎬 سینما', callback_data: 'fun_cinema' }],
+        [{ text: '🎵 موسیقی', callback_data: 'fun_music' }],
+        [{ text: '🌳 پارک', callback_data: 'fun_park' }],
+        [{ text: '🛌 استراحت', callback_data: 'fun_rest' }]
+      ])
+    })
+  }
+
+  if (data === 'family_menu') {
+    await answerCallbackQuery(callbackId)
+    return editMessage(chatId, messageId, familyMenuText(), {
+      reply_markup: combineButtons([
+        [{ text: '📞 تماس با خانواده', callback_data: 'family_call' }],
+        [{ text: '🍽 شام خانوادگی', callback_data: 'family_dinner' }],
+        [{ text: '🎁 خرید هدیه', callback_data: 'family_gift' }],
+        [{ text: '👶 وقت با بچه‌ها', callback_data: 'family_children' }]
+      ])
+    })
+  }
+
+  if (data === 'marriage_menu') {
+    await answerCallbackQuery(callbackId)
+    return editMessage(chatId, messageId, marriageMenuText(user), {
+      reply_markup: combineButtons([
+        [{ text: '💕 آشنایی با شریک', callback_data: 'marriage_partner' }],
+        [{ text: '💒 ازدواج', callback_data: 'marriage_wed' }],
+        [{ text: '👶 بچه‌دار شدن', callback_data: 'marriage_child' }]
+      ])
+    })
+  }
+
+  if (data === 'house_menu') {
+    await answerCallbackQuery(callbackId)
+    return editMessage(chatId, messageId, houseMenuText(), {
+      reply_markup: combineButtons([
+        [{ text: '🏚 اجاره خانه کوچک', callback_data: 'house_small' }],
+        [{ text: '🏠 خرید خانه معمولی', callback_data: 'house_normal' }],
+        [{ text: '🏡 خرید ویلای شیک', callback_data: 'house_villa' }]
+      ])
+    })
+  }
+
+  if (data === 'car_menu') {
+    await answerCallbackQuery(callbackId)
+    return editMessage(chatId, messageId, carMenuText(), {
+      reply_markup: combineButtons([
+        [{ text: '🚙 ماشین اقتصادی', callback_data: 'car_basic' }],
+        [{ text: '🚘 ماشین خوب', callback_data: 'car_good' }],
+        [{ text: '🏎 ماشین لوکس', callback_data: 'car_luxury' }]
+      ])
+    })
+  }
+
+  if (data === 'edu_menu') {
+    await answerCallbackQuery(callbackId)
+    return editMessage(chatId, messageId, eduMenuText(), {
+      reply_markup: combineButtons([
+        [{ text: '📘 مدرسه', callback_data: 'edu_school' }],
+        [{ text: '🎓 دانشگاه', callback_data: 'edu_university' }],
+        [{ text: '🧠 دوره تخصصی', callback_data: 'edu_special' }]
+      ])
+    })
+  }
+
+  if (data === 'bank_menu') {
+    await answerCallbackQuery(callbackId)
+    return editMessage(chatId, messageId, bankMenuText(), {
+      reply_markup: combineButtons([
+        [{ text: '🏦 واریز 50,000 تومان', callback_data: 'bank_deposit' }],
+        [{ text: '💸 برداشت 50,000 تومان', callback_data: 'bank_withdraw' }],
+        [{ text: '💳 دریافت وام 200,000 تومان', callback_data: 'bank_loan' }],
+        [{ text: '✅ پرداخت بدهی 100,000 تومان', callback_data: 'bank_pay_debt' }]
+      ])
+    })
+  }
+
+  if (data === 'biz_menu') {
+    await answerCallbackQuery(callbackId)
+    return editMessage(chatId, messageId, bizMenuText(), {
+      reply_markup: combineButtons([
+        [{ text: '🏪 مغازه کوچک', callback_data: 'biz_small' }],
+        [{ text: '🏬 فروشگاه متوسط', callback_data: 'biz_medium' }],
+        [{ text: '🏭 شرکت بزرگ', callback_data: 'biz_big' }]
+      ])
+    })
+  }
+
+  if (data === 'crime_menu') {
+    await answerCallbackQuery(callbackId)
+    return editMessage(chatId, messageId, crimeMenuText(), {
+      reply_markup: combineButtons([
+        [{ text: '👜 کیف‌قاپی', callback_data: 'crime_pickpocket' }],
+        [{ text: '🏪 دزدی از مغازه', callback_data: 'crime_shop' }],
+        [{ text: '🚨 تسلیم پلیس', callback_data: 'crime_surrender' }]
+      ])
+    })
+  }
+
+  if (data === 'mafia_menu') {
+    await answerCallbackQuery(callbackId)
+    return editMessage(chatId, messageId, mafiaMenuText(user), {
+      reply_markup: combineButtons([
+        [{ text: '🤝 عضویت در مافیا', callback_data: 'mafia_join' }],
+        [{ text: '🎯 مأموریت مافیا', callback_data: 'mafia_mission' }]
+      ])
+    })
+  }
+
+  if (data === 'hospital') {
+    await answerCallbackQuery(callbackId)
+    return editMessage(chatId, messageId, hospitalText(), {
+      reply_markup: combineButtons([
+        [{ text: '💉 درمان کامل', callback_data: 'hospital_heal' }]
+      ])
+    })
+  }
+
+  // =========================
+  // WORK
+  // =========================
+  if (data.startsWith('work_')) {
+    const allowed = canAct(user)
+    if (!allowed.ok) {
+      await answerCallbackQuery(callbackId, allowed.msg)
+      return
+    }
+
+    const left = cooldownLeft(user.lastWork, 60)
+    if (left > 0) {
+      await answerCallbackQuery(callbackId, `⏳ ${prettyCooldown(left)} دیگر صبر کن`)
+      return
+    }
+
+    let income = 0
+    let xp = 0
+    let text = ''
+
+    if (data === 'work_worker') {
+      income = 80000 + Math.floor(Math.random() * 50000)
+      xp = 12
+      user.job = 'کارگر'
+      applyNeedDecay(user, 20, 8, 4)
+      text = `🔨 امروز کارگری کردی و <b>${formatMoney(income)}</b> درآمد داشتی.`
+    }
+
+    if (data === 'work_office') {
+      income = 120000 + Math.floor(Math.random() * 70000)
+      xp = 16
+      user.job = 'کارمند اداری'
+      applyNeedDecay(user, 15, 3, 2)
+      text = `🏢 در کار اداری امروز <b>${formatMoney(income)}</b> حقوق گرفتی.`
+    }
+
+    if (data === 'work_driver') {
+      income = 150000 + Math.floor(Math.random() * 90000)
+      xp = 18
+      user.job = 'راننده'
+      applyNeedDecay(user, 18, 5, 3)
+      text = `🚕 با رانندگی امروز <b>${formatMoney(income)}</b> درآوردی.`
+    }
+
+    if (data === 'work_freelance') {
+      income = 180000 + Math.floor(Math.random() * 120000)
+      xp = 20
+      user.job = 'فریلنسر'
+      applyNeedDecay(user, 12, 2, 1)
+      text = `💻 پروژه فریلنسری انجام دادی و <b>${formatMoney(income)}</b> گرفتی.`
+    }
+
+    user.money += income
+    addXP(user, xp)
+    user.lastWork = Date.now()
+    clamp(user)
+
+    await answerCallbackQuery(callbackId, 'کار انجام شد')
+    return editMessage(chatId, messageId, `
+${text}
+
+⭐ XP دریافتی: <b>${xp}</b>
+❤️ سلامتی: <b>${user.health}</b>
+⚡ انرژی: <b>${user.energy}</b>
+😄 خوشحالی: <b>${user.happiness}</b>
+
+💵 پول نقد فعلی: <b>${formatMoney(user.money)}</b>
+`.trim(), {
+      reply_markup: combineButtons([
+        [{ text: '💼 دوباره منوی کار', callback_data: 'work_menu' }],
+        [{ text: '📊 پروفایل', callback_data: 'profile' }]
+      ])
+    })
+  }
+
+  // =========================
+  // FUN
+  // =========================
+  if (data.startsWith('fun_')) {
+    const left = cooldownLeft(user.lastFun, 45)
+    if (left > 0) {
+      await answerCallbackQuery(callbackId, `⏳ ${prettyCooldown(left)} دیگر صبر کن`)
+      return
+    }
+
+    let cost = 0
+    let hp = 0
+    let en = 0
+    let happy = 0
+    let xp = 0
+    let text = ''
+
+    if (data === 'fun_cinema') {
+      cost = 40000
+      hp = 3
+      en = 8
+      happy = 18
+      xp = 5
+      text = '🎬 رفتی سینما و حسابی حالت خوب شد.'
+    }
+
+    if (data === 'fun_music') {
+      cost = 15000
+      hp = 2
+      en = 5
+      happy = 12
+      xp = 4
+      text = '🎵 موسیقی گوش دادی و آروم شدی.'
+    }
+
+    if (data === 'fun_park') {
+      cost = 10000
+      hp = 6
+      en = 10
+      happy = 14
+      xp = 4
+      text = '🌳 رفتی پارک و هوای تازه خوردی.'
+    }
+
+    if (data === 'fun_rest') {
+      cost = 0
+      hp = 4
+      en = 20
+      happy = 8
+      xp = 3
+      text = '🛌 کمی استراحت کردی و جون گرفتی.'
+    }
+
+    if (user.money < cost) {
+      await answerCallbackQuery(callbackId, 'پولت کافی نیست')
+      return
+    }
+
+    user.money -= cost
+    user.health += hp
+    user.energy += en
+    user.happiness += happy
+    addXP(user, xp)
+    user.lastFun = Date.now()
+    clamp(user)
+
+    await answerCallbackQuery(callbackId, 'تفریح انجام شد')
+    return editMessage(chatId, messageId, `
+${text}
+
+💸 هزینه: <b>${formatMoney(cost)}</b>
+❤️ سلامتی: <b>+${hp}</b>
+⚡ انرژی: <b>+${en}</b>
+😄 خوشحالی: <b>+${happy}</b>
+⭐ XP: <b>+${xp}</b>
+`.trim(), {
+      reply_markup: combineButtons([
+        [{ text: '🎉 دوباره منوی تفریح', callback_data: 'fun_menu' }],
+        [{ text: '📊 پروفایل', callback_data: 'profile' }]
+      ])
+    })
+  }
+
+  // =========================
+  // FAMILY
+  // =========================
+  if (data.startsWith('family_')) {
+    const left = cooldownLeft(user.lastFamily, 60)
+    if (left > 0) {
+      await answerCallbackQuery(callbackId, `⏳ ${prettyCooldown(left)} دیگر صبر کن`)
+      return
+    }
+
+    let cost = 0
+    let family = 0
+    let happy = 0
+    let hp = 0
+    let text = ''
+
+    if (data === 'family_call') {
+      family = 10
+      happy = 6
+      text = '📞 با خانواده تماس گرفتی و حال همه را پرسیدی.'
+    }
+
+    if (data === 'family_dinner') {
+      cost = 70000
+      family = 18
+      happy = 10
+      hp = 4
+      text = '🍽 یک شام گرم خانوادگی داشتی.'
+    }
+
+    if (data === 'family_gift') {
+      cost = 120000
+      family = 20
+      happy = 8
+      text = '🎁 برای خانواده هدیه خریدی.'
+    }
+
+    if (data === 'family_children') {
+      if (user.children <= 0) {
+        await answerCallbackQuery(callbackId, 'فعلاً بچه‌ای نداری')
+        return
+      }
+      family = 16
+      happy = 12
+      text = '👶 با بچه‌ها وقت گذراندی.'
+    }
+
+    if (user.money < cost) {
+      await answerCallbackQuery(callbackId, 'پولت کافی نیست')
+      return
+    }
+
+    user.money -= cost
+    user.familyLove += family
+    user.happiness += happy
+    user.health += hp
+    addXP(user, 6)
+    user.lastFamily = Date.now()
+    clamp(user)
+
+    await answerCallbackQuery(callbackId, 'خانواده خوشحال شد')
+    return editMessage(chatId, messageId, `
+${text}
+
+❤️‍🔥 عشق خانوادگی: <b>+${family}</b>
+😄 خوشحالی: <b>+${happy}</b>
+❤️ سلامتی: <b>+${hp}</b>
+💸 هزینه: <b>${formatMoney(cost)}</b>
+`.trim(), {
+      reply_markup: combineButtons([
+        [{ text: '👨‍👩‍👧 دوباره منوی خانواده', callback_data: 'family_menu' }],
+        [{ text: '📊 پروفایل', callback_data: 'profile' }]
+      ])
+    })
+  }
+
+  // =========================
+  // MARRIAGE
+  // =========================
+  if (data === 'marriage_partner') {
+    if (user.partner) {
+      await answerCallbackQuery(callbackId, 'قبلاً شریک پیدا کرده‌ای')
+      return
+    }
+    const names = ['سارا', 'نگار', 'مهسا', 'آرین', 'آتنا', 'پارسا', 'نیکی']
+    const partner = names[Math.floor(Math.random() * names.length)]
+    user.partner = partner
+    user.happiness += 10
+    user.familyLove += 8
+    clamp(user)
+
+    await answerCallbackQuery(callbackId, 'شریک پیدا شد')
+    return editMessage(chatId, messageId, `
+💕 با <b>${partner}</b> آشنا شدی.
+رابطه‌ات شروع شد و زندگی‌ات رنگ گرفت.
+`.trim(), {
+      reply_markup: combineButtons([
+        [{ text: '💒 ازدواج', callback_data: 'marriage_wed' }],
+        [{ text: '📊 پروفایل', callback_data: 'profile' }]
+      ])
+    })
+  }
+
+  if (data === 'marriage_wed') {
+    if (user.married) {
+      await answerCallbackQuery(callbackId, 'تو قبلاً ازدواج کرده‌ای')
+      return
+    }
+    if (!user.partner) {
+      await answerCallbackQuery(callbackId, 'اول باید شریک پیدا کنی')
+      return
+    }
+    if (user.money < 500000) {
+      await answerCallbackQuery(callbackId, 'برای مراسم حداقل 500,000 تومان لازم داری')
+      return
+    }
+
+    user.money -= 500000
+    user.married = true
+    user.familyLove += 20
+    user.happiness += 20
+    addXP(user, 25)
+    clamp(user)
+
+    await answerCallbackQuery(callbackId, 'ازدواج انجام شد')
+    return editMessage(chatId, messageId, `
+💒 تو با <b>${user.partner}</b> ازدواج کردی!
+
+💸 هزینه مراسم: <b>${formatMoney(500000)}</b>
+😄 خوشحالی: <b>+20</b>
+❤️‍🔥 عشق خانوادگی: <b>+20</b>
+`.trim(), {
+      reply_markup: combineButtons([
+        [{ text: '👶 بچه‌دار شدن', callback_data: 'marriage_child' }],
+        [{ text: '📊 پروفایل', callback_data: 'profile' }]
+      ])
+    })
+  }
+
+  if (data === 'marriage_child') {
+    if (!user.married) {
+      await answerCallbackQuery(callbackId, 'اول باید ازدواج کنی')
+      return
+    }
+    if (user.money < 300000) {
+      await answerCallbackQuery(callbackId, 'برای بچه‌دار شدن حداقل 300,000 تومان لازم داری')
+      return
+    }
+
+    user.money -= 300000
+    user.children += 1
+    user.familyLove += 15
+    user.happiness += 18
+    addXP(user, 20)
+    clamp(user)
+
+    await answerCallbackQuery(callbackId, 'بچه‌دار شدی')
+    return editMessage(chatId, messageId, `
+👶 تبریک! خانواده‌ات بزرگ‌تر شد.
+
+تعداد بچه‌ها: <b>${user.children}</b>
+💸 هزینه: <b>${formatMoney(300000)}</b>
+`.trim(), {
+      reply_markup: combineButtons([
+        [{ text: '📊 پروفایل', callback_data: 'profile' }]
+      ])
+    })
+  }
+
+  // =========================
+  // HOUSE
+  // =========================
+  if (data === 'house_small' || data === 'house_normal' || data === 'house_villa') {
+    let price = 0
+    let title = ''
+
+    if (data === 'house_small') {
+      price = 150000
+      title = 'خانه کوچک'
+    }
+    if (data === 'house_normal') {
+      price = 900000
+      title = 'خانه معمولی'
+    }
+    if (data === 'house_villa') {
+      price = 3500000
+      title = 'ویلای شیک'
+    }
+
+    if (user.money < price) {
+      await answerCallbackQuery(callbackId, 'پولت کافی نیست')
+      return
+    }
+
+    user.money -= price
+    user.house = title
+    user.happiness += 10
+    user.familyLove += 8
+    addXP(user, 18)
+    clamp(user)
+
+    await answerCallbackQuery(callbackId, 'خانه خریدی')
+    return editMessage(chatId, messageId, `
+🏠 تو حالا صاحب <b>${title}</b> شدی.
+
+💸 هزینه: <b>${formatMoney(price)}</b>
+😄 خوشحالی: <b>+10</b>
+❤️‍🔥 عشق خانوادگی: <b>+8</b>
+`.trim(), {
+      reply_markup: combineButtons([
+        [{ text: '🏠 دوباره منوی خانه', callback_data: 'house_menu' }],
+        [{ text: '📊 پروفایل', callback_data: 'profile' }]
+      ])
+    })
+  }
+
+  // =========================
+  // CAR
+  // =========================
+  if (data === 'car_basic' || data === 'car_good' || data === 'car_luxury') {
+    let price = 0
+    let title = ''
+
+    if (data === 'car_basic') {
+      price = 700000
+      title = 'ماشین اقتصادی'
+    }
+    if (data === 'car_good') {
+      price = 2000000
+      title = 'ماشین خوب'
+    }
+    if (data === 'car_luxury') {
+      price = 6000000
+      title = 'ماشین لوکس'
+    }
+
+    if (user.money < price) {
+      await answerCallbackQuery(callbackId, 'پولت کافی نیست')
+      return
+    }
+
+    user.money -= price
+    user.car = title
+    user.happiness += 12
+    addXP(user, 16)
+    clamp(user)
+
+    await answerCallbackQuery(callbackId, 'ماشین خریدی')
+    return editMessage(chatId, messageId, `
+🚗 تو یک <b>${title}</b> خریدی.
+
+💸 هزینه: <b>${formatMoney(price)}</b>
+😄 خوشحالی: <b>+12</b>
+`.trim(), {
+      reply_markup: combineButtons([
+        [{ text: '🚗 دوباره منوی ماشین', callback_data: 'car_menu' }],
+        [{ text: '📊 پروفایل', callback_data: 'profile' }]
+      ])
+    })
+  }
+
+  // =========================
+  // EDUCATION
+  // =========================
+  if (data === 'edu_school' || data === 'edu_university' || data === 'edu_special') {
+    const left = cooldownLeft(user.lastStudy, 80)
+    if (left > 0) {
+      await answerCallbackQuery(callbackId, `⏳ ${prettyCooldown(left)} دیگر صبر کن`)
+      return
+    }
+
+    let price = 0
+    let title = ''
+    let xp = 0
+
+    if (data === 'edu_school') {
+      price = 80000
+      title = 'مدرسه‌رفته'
+      xp = 14
+    }
+    if (data === 'edu_university') {
+      price = 400000
+      title = 'دانشگاهی'
+      xp = 28
+    }
+    if (data === 'edu_special') {
+      price = 900000
+      title = 'متخصص'
+      xp = 42
+    }
+
+    if (user.money < price) {
+      await answerCallbackQuery(callbackId, 'پولت کافی نیست')
+      return
+    }
+
+    user.money -= price
+    user.education = title
+    user.happiness += 4
+    addXP(user, xp)
+    user.lastStudy = Date.now()
+    clamp(user)
+
+    await answerCallbackQuery(callbackId, 'تحصیل انجام شد')
+    return editMessage(chatId, messageId, `
+🎓 وضعیت تحصیلی تو حالا <b>${title}</b> است.
+
+💸 هزینه: <b>${formatMoney(price)}</b>
+⭐ XP: <b>+${xp}</b>
+`.trim(), {
+      reply_markup: combineButtons([
+        [{ text: '🎓 دوباره منوی تحصیل', callback_data: 'edu_menu' }],
+        [{ text: '📊 پروفایل', callback_data: 'profile' }]
+      ])
+    })
+  }
+
+  // =========================
+  // BANK
+  // =========================
+  if (data === 'bank_deposit') {
+    const amount = Math.min(50000, user.money)
+    if (amount <= 0) {
+      await answerCallbackQuery(callbackId, 'پول نقد کافی نداری')
+      return
+    }
+    user.money -= amount
+    user.bank += amount
+    clamp(user)
+
+    await answerCallbackQuery(callbackId, 'واریز انجام شد')
+    return editMessage(chatId, messageId, `
+🏦 <b>واریز موفق</b>
+
+💸 مبلغ واریز: <b>${formatMoney(amount)}</b>
+💵 پول نقد: <b>${formatMoney(user.money)}</b>
+🏦 موجودی بانک: <b>${formatMoney(user.bank)}</b>
+`.trim(), {
+      reply_markup: combineButtons([
+        [{ text: '🏦 دوباره منوی بانک', callback_data: 'bank_menu' }],
+        [{ text: '📊 پروفایل', callback_data: 'profile' }]
+      ])
+    })
+  }
+
+  if (data === 'bank_withdraw') {
+    const amount = Math.min(50000, user.bank)
+    if (amount <= 0) {
+      await answerCallbackQuery(callbackId, 'پول کافی در بانک نداری')
+      return
+    }
+    user.bank -= amount
+    user.money += amount
+    clamp(user)
+
+    await answerCallbackQuery(callbackId, 'برداشت انجام شد')
+    return editMessage(chatId, messageId, `
+💸 <b>برداشت موفق</b>
+
+💰 مبلغ برداشت: <b>${formatMoney(amount)}</b>
+💵 پول نقد: <b>${formatMoney(user.money)}</b>
+🏦 موجودی بانک: <b>${formatMoney(user.bank)}</b>
+`.trim(), {
+      reply_markup: combineButtons([
+        [{ text: '🏦 دوباره منوی بانک', callback_data: 'bank_menu' }],
+        [{ text: '📊 پروفایل', callback_data: 'profile' }]
+      ])
+    })
+  }
+
+  if (data === 'bank_loan') {
+    user.money += 200000
+    user.debt += 240000
+    clamp(user)
+
+    await answerCallbackQuery(callbackId, 'وام دریافت شد')
+    return editMessage(chatId, messageId, `
+💳 <b>وام دریافت کردی</b>
+
+💵 مبلغ وام: <b>${formatMoney(200000)}</b>
+📉 بدهی جدید: <b>${formatMoney(240000)}</b>
+
+نکته: سود وام روی بدهی اعمال شده.
+`.trim(), {
+      reply_markup: combineButtons([
+        [{ text: '🏦 دوباره منوی بانک', callback_data: 'bank_menu' }],
+        [{ text: '📊 پروفایل', callback_data: 'profile' }]
+      ])
+    })
+  }
+
+  if (data === 'bank_pay_debt') {
+    const amount = Math.min(100000, user.money, user.debt)
+    if (amount <= 0) {
+      await answerCallbackQuery(callbackId, 'نه بدهی داری نه پول کافی')
+      return
+    }
+
+    user.money -= amount
+    user.debt -= amount
+    clamp(user)
+
+    await answerCallbackQuery(callbackId, 'بدهی پرداخت شد')
+    return editMessage(chatId, messageId, `
+✅ <b>بخشی از بدهی پرداخت شد</b>
+
+💸 مبلغ پرداختی: <b>${formatMoney(amount)}</b>
+📉 بدهی باقی‌مانده: <b>${formatMoney(user.debt)}</b>
+`.trim(), {
+      reply_markup: combineButtons([
+        [{ text: '🏦 دوباره منوی بانک', callback_data: 'bank_menu' }],
+        [{ text: '📊 پروفایل', callback_data: 'profile' }]
+      ])
+    })
+  }
+
+  // =========================
+  // BUSINESS
+  // =========================
+  if (data === 'biz_small' || data === 'biz_medium' || data === 'biz_big') {
+    let price = 0
+    let title = ''
+    let needLevel = 1
+
+    if (data === 'biz_small') {
+      price = 1500000
+      title = 'مغازه کوچک'
+      needLevel = 2
+    }
+    if (data === 'biz_medium') {
+      price = 5000000
+      title = 'فروشگاه متوسط'
+      needLevel = 4
+    }
+    if (data === 'biz_big') {
+      price = 15000000
+      title = 'شرکت بزرگ'
+      needLevel = 7
+    }
+
+    if (user.level < needLevel) {
+      await answerCallbackQuery(callbackId, `برای این کار لِول ${needLevel} لازم است`)
+      return
+    }
+
+    if (user.money < price) {
+      await answerCallbackQuery(callbackId, 'پولت کافی نیست')
+      return
+    }
+
+    user.money -= price
+    user.business = title
+    user.happiness += 15
+    addXP(user, 35)
+    clamp(user)
+
+    await answerCallbackQuery(callbackId, 'کسب‌وکار خریدی')
+    return editMessage(chatId, messageId, `
+🏢 تو صاحب <b>${title}</b> شدی.
+
+💸 هزینه: <b>${formatMoney(price)}</b>
+⭐ XP: <b>+35</b>
+😄 خوشحالی: <b>+15</b>
+`.trim(), {
+      reply_markup: combineButtons([
+        [{ text: '🏢 دوباره منوی کسب‌وکار', callback_data: 'biz_menu' }],
+        [{ text: '📊 پروفایل', callback_data: 'profile' }]
+      ])
+    })
+  }
+
+  // =========================
+  // CRIME
+  // =========================
+  if (data === 'crime_pickpocket' || data === 'crime_shop') {
+    const allowed = canAct(user)
+    if (!allowed.ok) {
+      await answerCallbackQuery(callbackId, allowed.msg)
+      return
+    }
+
+    const left = cooldownLeft(user.lastCrime, 90)
+    if (left > 0) {
+      await answerCallbackQuery(callbackId, `⏳ ${prettyCooldown(left)} دیگر صبر کن`)
+      return
+    }
+
+    const successChance = data === 'crime_pickpocket' ? 0.65 : 0.45
+    const success = Math.random() < successChance
+    user.lastCrime = Date.now()
+
+    if (success) {
+      const gain = data === 'crime_pickpocket'
+        ? 90000 + Math.floor(Math.random() * 70000)
+        : 200000 + Math.floor(Math.random() * 150000)
+
+      user.money += gain
+      user.crimeLevel += 1
+      user.happiness += 5
+      addXP(user, 14)
+      clamp(user)
+
+      await answerCallbackQuery(callbackId, 'جرم موفق شد')
+      return editMessage(chatId, messageId, `
+🕵️ عملیات موفق بود!
+
+💵 سود جرم: <b>${formatMoney(gain)}</b>
+🚨 سطح جرم: <b>${user.crimeLevel}</b>
+`.trim(), {
+        reply_markup: combineButtons([
+          [{ text: '🕵️ دوباره منوی جرم', callback_data: 'crime_menu' }],
+          [{ text: '📊 پروفایل', callback_data: 'profile' }]
+        ])
+      })
+    } else {
+      const fine = data === 'crime_pickpocket' ? 40000 : 100000
+      user.money = Math.max(0, user.money - fine)
+      user.health -= data === 'crime_pickpocket' ? 10 : 18
+      user.jailTurns += data === 'crime_pickpocket' ? 1 : 2
+      user.crimeLevel += 2
+      clamp(user)
+
+      await answerCallbackQuery(callbackId, 'پلیس گرفتت')
+      return editMessage(chatId, messageId, `
+🚔 پلیس گرفتت!
+
+💸 جریمه: <b>${formatMoney(fine)}</b>
+❤️ سلامتی فعلی: <b>${user.health}</b>
+⛓ زندان: <b>${user.jailTurns}</b> نوبت
+🚨 سطح جرم: <b>${user.crimeLevel}</b>
+`.trim(), {
+        reply_markup: combineButtons([
+          [{ text: '📊 پروفایل', callback_data: 'profile' }]
+        ])
+      })
+    }
+  }
+
+  if (data === 'crime_surrender') {
+    if (user.crimeLevel <= 0 && user.jailTurns <= 0) {
+      await answerCallbackQuery(callbackId, 'چیزی برای تسلیم شدن نداری')
+      return
+    }
+
+    user.crimeLevel = Math.max(0, user.crimeLevel - 2)
+    user.jailTurns = Math.max(0, user.jailTurns - 1)
+    user.happiness -= 5
+    clamp(user)
+
+    await answerCallbackQuery(callbackId, 'تسلیم شدی')
+    return editMessage(chatId, messageId, `
+🚨 تو خودت را به پلیس معرفی کردی.
+
+🕵️ سطح جرم جدید: <b>${user.crimeLevel}</b>
+⛓ زندان باقی‌مانده: <b>${user.jailTurns}</b>
+`.trim(), {
+      reply_markup: combineButtons([
+        [{ text: '🕵️ دوباره منوی جرم', callback_data: 'crime_menu' }],
+        [{ text: '📊 پروفایل', callback_data: 'profile' }]
+      ])
+    })
+  }
+
+  // =========================
+  // MAFIA
+  // =========================
+  if (data === 'mafia_join') {
+    if (user.mafia) {
+      await answerCallbackQuery(callbackId, 'تو قبلاً عضو مافیا شده‌ای')
+      return
+    }
+    if (user.level < 3) {
+      await answerCallbackQuery(callbackId, 'برای ورود به مافیا حداقل لِول 3 لازم است')
+      return
+    }
+
+    user.mafia = true
+    user.crimeLevel += 2
+    addXP(user, 20)
+    clamp(user)
+
+    await answerCallbackQuery(callbackId, 'به مافیا پیوستی')
+    return editMessage(chatId, messageId, `
+🖤 تو حالا عضو مافیا هستی.
+
+از این به بعد می‌توانی مأموریت‌های سنگین‌تر انجام دهی،
+اما خطر زندان هم بیشتر شده.
+`.trim(), {
+      reply_markup: combineButtons([
+        [{ text: '🎯 مأموریت مافیا', callback_data: 'mafia_mission' }],
+        [{ text: '📊 پروفایل', callback_data: 'profile' }]
+      ])
+    })
+  }
+
+  if (data === 'mafia_mission') {
+    if (!user.mafia) {
+      await answerCallbackQuery(callbackId, 'اول باید عضو مافیا شوی')
+      return
+    }
+
+    const allowed = canAct(user)
+    if (!allowed.ok) {
+      await answerCallbackQuery(callbackId, allowed.msg)
+      return
+    }
+
+    const left = cooldownLeft(user.lastMafia, 120)
+    if (left > 0) {
+      await answerCallbackQuery(callbackId, `⏳ ${prettyCooldown(left)} دیگر صبر کن`)
+      return
+    }
+
+    user.lastMafia = Date.now()
+
+    const success = Math.random() < 0.5
+    if (success) {
+      const gain = 350000 + Math.floor(Math.random() * 250000)
+      user.money += gain
+      user.crimeLevel += 3
+      user.health -= 8
+      addXP(user, 30)
+      clamp(user)
+
+      await answerCallbackQuery(callbackId, 'ماموریت موفق بود')
+      return editMessage(chatId, messageId, `
+🎯 مأموریت مافیا موفق شد!
+
+💵 درآمد: <b>${formatMoney(gain)}</b>
+🚨 سطح جرم: <b>${user.crimeLevel}</b>
+❤️ سلامتی: <b>${user.health}</b>
+⭐ XP: <b>+30</b>
+`.trim(), {
+        reply_markup: combineButtons([
+          [{ text: '🖤 دوباره منوی مافیا', callback_data: 'mafia_menu' }],
+          [{ text: '📊 پروفایل', callback_data: 'profile' }]
+        ])
+      })
+    } else {
+      user.health -= 20
+      user.jailTurns += 3
+      user.crimeLevel += 4
+      clamp(user)
+
+      await answerCallbackQuery(callbackId, 'ماموریت شکست خورد')
+      return editMessage(chatId, messageId, `
+🚔 مأموریت خراب شد و پلیس ردت را زد!
+
+❤️ سلامتی: <b>${user.health}</b>
+⛓ زندان: <b>${user.jailTurns}</b> نوبت
+🚨 سطح جرم: <b>${user.crimeLevel}</b>
+`.trim(), {
+        reply_markup: combineButtons([
+          [{ text: '📊 پروفایل', callback_data: 'profile' }]
+        ])
+      })
+    }
+  }
+
+  // =========================
+  // HOSPITAL
+  // =========================
+  if (data === 'hospital_heal') {
+    const cost = 120000
+    if (user.money < cost) {
+      await answerCallbackQuery(callbackId, 'پولت کافی نیست')
+      return
+    }
+
+    user.money -= cost
+    user.health = 100
+    user.energy = Math.min(100, user.energy + 20)
+    clamp(user)
+
+    await answerCallbackQuery(callbackId, 'درمان شدی')
+    return editMessage(chatId, messageId, `
+🏥 درمان کامل انجام شد.
+
+❤️ سلامتی: <b>100</b>
+⚡ انرژی: <b>${user.energy}</b>
+💸 هزینه: <b>${formatMoney(cost)}</b>
+`.trim(), {
+      reply_markup: combineButtons([
+        [{ text: '📊 پروفایل', callback_data: 'profile' }],
+        [{ text: '🏥 دوباره بیمارستان', callback_data: 'hospital' }]
+      ])
+    })
+  }
+
+  await answerCallbackQuery(callbackId, 'دستور ناشناخته')
+}
+
+// =========================
+// MESSAGE HANDLER
+// =========================
+async function handleMessage(msg) {
+  const chatId = msg.chat.id
+  const userId = msg.from.id
+  const text = (msg.text || '').trim()
+  const user = getUser(userId, safeName(msg.from))
+
+  if (user.jailTurns > 0 && !text.startsWith('/')) {
+    user.jailTurns = Math.max(0, user.jailTurns - 1)
+  }
+
+  if (text === '/start') {
+    return renderMain(chatId, null, user)
+  }
+
+  if (text === '/myid') {
+    return sendMessage(chatId, `🆔 آیدی شما: <code>${userId}</code>`)
+  }
+
+  if (text === '/admin') {
+    if (!isAdmin(userId)) {
+      return sendMessage(chatId, '⛔ شما ادمین نیستی.')
+    }
+
+    return sendMessage(chatId, `
+👑 <b>پنل ادمین</b>
+
+دستورها:
+<code>/givecoins USER_ID AMOUNT</code>
+<code>/setmoney USER_ID AMOUNT</code>
+<code>/setbank USER_ID AMOUNT</code>
+<code>/setlevel USER_ID LEVEL</code>
+<code>/banjail USER_ID TURNS</code>
+<code>/profileof USER_ID</code>
+`.trim())
+  }
+
+  if (text.startsWith('/givecoins')) {
+    if (!isAdmin(userId)) return sendMessage(chatId, '⛔ دسترسی نداری.')
+
+    const parts = text.split(/\s+/)
+    const targetId = parts[1]
+    const amount = Number(parts[2])
+
+    if (!targetId || !Number.isFinite(amount) || amount <= 0) {
+      return sendMessage(chatId, 'فرمت درست:\n<code>/givecoins USER_ID AMOUNT</code>')
+    }
+
+    const target = getUser(targetId, 'بازیکن')
+    target.money += amount
+    clamp(target)
+
+    return sendMessage(chatId, `✅ مبلغ <b>${formatMoney(amount)}</b> به کاربر <code>${targetId}</code> داده شد.`)
+  }
+
+  if (text.startsWith('/setmoney')) {
+    if (!isAdmin(userId)) return sendMessage(chatId, '⛔ دسترسی نداری.')
+
+    const parts = text.split(/\s+/)
+    const targetId = parts[1]
+    const amount = Number(parts[2])
+
+    if (!targetId || !Number.isFinite(amount) || amount < 0) {
+      return sendMessage(chatId, 'فرمت درست:\n<code>/setmoney USER_ID AMOUNT</code>')
+    }
+
+    const target = getUser(targetId, 'بازیکن')
+    target.money = amount
+    clamp(target)
+
+    return sendMessage(chatId, `✅ پول نقد کاربر <code>${targetId}</code> شد <b>${formatMoney(amount)}</b>`)
+  }
+
+  if (text.startsWith('/setbank')) {
+    if (!isAdmin(userId)) return sendMessage(chatId, '⛔ دسترسی نداری.')
+
+    const parts = text.split(/\s+/)
+    const targetId = parts[1]
+    const amount = Number(parts[2])
+
+    if (!targetId || !Number.isFinite(amount) || amount < 0) {
+      return sendMessage(chatId, 'فرمت درست:\n<code>/setbank USER_ID AMOUNT</code>')
+    }
+
+    const target = getUser(targetId, 'بازیکن')
+    target.bank = amount
+    clamp(target)
+
+    return sendMessage(chatId, `✅ موجودی بانک کاربر <code>${targetId}</code> شد <b>${formatMoney(amount)}</b>`)
+  }
+
+  if (text.startsWith('/setlevel')) {
+    if (!isAdmin(userId)) return sendMessage(chatId, '⛔ دسترسی نداری.')
+
+    const parts = text.split(/\s+/)
+    const targetId = parts[1]
+    const amount = Number(parts[2])
+
+    if (!targetId || !Number.isFinite(amount) || amount < 1) {
+      return sendMessage(chatId, 'فرمت درست:\n<code>/setlevel USER_ID LEVEL</code>')
+    }
+
+    const target = getUser(targetId, 'بازیکن')
+    target.level = amount
+    clamp(target)
+
+    return sendMessage(chatId, `✅ لِول کاربر <code>${targetId}</code> شد <b>${amount}</b>`)
+  }
+
+  if (text.startsWith('/banjail')) {
+    if (!isAdmin(userId)) return sendMessage(chatId, '⛔ دسترسی نداری.')
+
+    const parts = text.split(/\s+/)
+    const targetId = parts[1]
+    const turns = Number(parts[2])
+
+    if (!targetId || !Number.isFinite(turns) || turns < 0) {
+      return sendMessage(chatId, 'فرمت درست:\n<code>/banjail USER_ID TURNS</code>')
+    }
+
+    const target = getUser(targetId, 'بازیکن')
+    target.jailTurns = turns
+    clamp(target)
+
+    return sendMessage(chatId, `✅ نوبت زندان کاربر <code>${targetId}</code> شد <b>${turns}</b>`)
+  }
+
+  if (text.startsWith('/profileof')) {
+    if (!isAdmin(userId)) return sendMessage(chatId, '⛔ دسترسی نداری.')
+
+    const parts = text.split(/\s+/)
+    const targetId = parts[1]
+
+    if (!targetId) {
+      return sendMessage(chatId, 'فرمت درست:\n<code>/profileof USER_ID</code>')
+    }
+
+    const target = getUser(targetId, 'بازیکن')
+    return sendMessage(chatId, profileText(target))
+  }
+
+  return sendMessage(chatId, `
+دستور نامعتبره.
+
+دستورهای اصلی:
+<code>/start</code>
+<code>/myid</code>
+
+برای بازی از دکمه‌ها استفاده کن.
+`.trim())
+}
 
 // =========================
 // ROUTES
 // =========================
 app.get('/', (req, res) => {
-  res.send('Life Simulator Bot is running ✅');
-});
+  res.send('Life Bot ESM is running')
+})
 
-app.post(`/webhook/${SECRET_PATH}`, async (req, res) => {
+app.post(`/${SECRET_PATH}`, async (req, res) => {
+  res.sendStatus(200)
+
   try {
-    const { message, callback_query } = req.body;
-    const chatId = message?.chat?.id || callback_query?.message?.chat?.id;
-    const fromId = message?.from?.id || callback_query?.from?.id;
-    const text = message?.text;
+    const update = req.body
 
-    if (!chatId) return res.sendStatus(200);
-
-    const user = getUser(chatId);
-
-    if (callback_query?.id) {
-      await answerCallbackQuery(callback_query.id);
+    if (update.message) {
+      await handleMessage(update.message)
     }
 
-    // =========================
-    // JAIL CHECK
-    // =========================
-    if (
-      user.jailTurns > 0 &&
-      callback_query?.data !== 'main' &&
-      callback_query?.data !== 'refresh'
-    ) {
-      user.jailTurns--;
-      clamp(user);
-
-      if (user.jailTurns === 0) {
-        user.criminal = false;
-        await sendMessage(chatId, '🔓 از زندان آزاد شدی!', mainMenu);
-      } else {
-        await sendMessage(
-          chatId,
-          `🚔 هنوز زندانی هستی. ${user.jailTurns} نوبت باقی مانده.`,
-          mainMenu
-        );
-      }
-
-      return res.sendStatus(200);
+    if (update.callback_query) {
+      await handleCallback(update.callback_query)
     }
-
-    // =========================
-    // ADMIN COMMANDS
-    // =========================
-    if (text === '/myid') {
-      await sendMessage(chatId, `Your ID: ${fromId}`);
-      return res.sendStatus(200);
-    }
-
-    if (text === '/admin') {
-      if (!isAdmin(fromId)) {
-        await sendMessage(chatId, `⛔ فقط ادمین\nID تو: ${fromId}`);
-        return res.sendStatus(200);
-      }
-
-      await sendMessage(
-        chatId,
-        `🛠 *پنل ادمین*
-
-دستورها:
-/givecoins USER_ID AMOUNT
-
-مثال:
-/givecoins 123456789 500`
-      );
-      return res.sendStatus(200);
-    }
-
-    if (text?.startsWith('/givecoins')) {
-      if (!isAdmin(fromId)) {
-        await sendMessage(chatId, '⛔ فقط ادمین');
-        return res.sendStatus(200);
-      }
-
-      const parts = text.trim().split(/\s+/);
-      const targetUserId = Number(parts[1]);
-      const amount = Number(parts[2]);
-
-      if (!targetUserId || Number.isNaN(amount) || amount <= 0) {
-        await sendMessage(chatId, 'فرمت درست:\n/givecoins USER_ID AMOUNT');
-        return res.sendStatus(200);
-      }
-
-      const targetUser = getUser(targetUserId);
-      targetUser.money += amount;
-      clamp(targetUser);
-
-      await sendMessage(
-        chatId,
-        `✅ ${amount}$ به کاربر ${targetUserId} داده شد.
-💰 پول فعلی: ${targetUser.money}$`
-      );
-
-      try {
-        await sendMessage(
-          targetUserId,
-          `🎁 ادمین بهت ${amount}$ پول داد.
-💰 موجودی فعلی: ${targetUser.money}$`
-        );
-      } catch (e) {
-        console.error('خطا در ارسال پیام به کاربر:', e);
-      }
-
-      return res.sendStatus(200);
-    }
-
-    // =========================
-    // START
-    // =========================
-    if (text === '/start') {
-      await sendMessage(
-        chatId,
-        `سلام 👋
-به شبیه‌ساز زندگی خوش اومدی.
-
-${statusText(user)}
-یکی از بخش‌ها رو انتخاب کن:`,
-        mainMenu
-      );
-      return res.sendStatus(200);
-    }
-
-    if (!callback_query) return res.sendStatus(200);
-
-    const data = callback_query.data;
-
-    // =========================
-    // MAIN / REFRESH
-    // =========================
-    if (data === 'main' || data === 'refresh') {
-      await sendMessage(chatId, `${statusText(user)}\nیکی از گزینه‌ها را انتخاب کن:`, mainMenu);
-    }
-
-    // =========================
-    // WORK
-    // =========================
-    else if (data === 'work_menu') {
-      await sendMessage(chatId, `${statusText(user)}\nیک شغل انتخاب کن:`, [
-        [{ text: '🔨 کارگری (+20 | -10❤️ | +10XP)', callback_data: 'work_simple' }],
-        [{ text: '💻 کار اداری (+35 | -15❤️ | +15XP)', callback_data: 'work_office' }],
-        [{ text: '🚕 رانندگی (+25 | -12❤️ | +12XP)', callback_data: 'work_driver' }],
-        ...back
-      ]);
-    }
-
-    else if (data === 'work_simple') {
-      if (user.health < 10) {
-        await sendMessage(chatId, '😵 خسته‌ای، اول استراحت کن.', mainMenu);
-        return res.sendStatus(200);
-      }
-
-      user.job = 'کارگر';
-      const up = reward(user, 20 + user.level * 2, 10, -10);
-      let txt = '✅ کارگری کردی.';
-
-      if (Math.random() < 0.12) {
-        user.money += 30;
-        txt += '\n🎁 پاداش گرفتی: 30$';
-      }
-
-      if (up) txt += `\n🎉 لول آپ! لول ${user.level}`;
-
-      clamp(user);
-      await sendMessage(chatId, `${txt}\n\n${statusText(user)}`, mainMenu);
-    }
-
-    else if (data === 'work_office') {
-      if (user.health < 15) {
-        await sendMessage(chatId, '😵 انرژی کافی نداری.', mainMenu);
-        return res.sendStatus(200);
-      }
-
-      user.job = 'کارمند';
-      const up = reward(user, 35 + user.level * 3, 15, -15);
-      let txt = '✅ کار اداری انجام دادی.';
-
-      if (Math.random() < 0.1) {
-        user.money += 50;
-        txt += '\n📈 پاداش عملکرد: 50$';
-      }
-
-      if (up) txt += `\n🎉 لول آپ! لول ${user.level}`;
-
-      clamp(user);
-      await sendMessage(chatId, `${txt}\n\n${statusText(user)}`, mainMenu);
-    }
-
-    else if (data === 'work_driver') {
-      if (user.health < 12) {
-        await sendMessage(chatId, '🚫 خیلی خسته‌ای برای رانندگی.', mainMenu);
-        return res.sendStatus(200);
-      }
-
-      user.job = 'راننده';
-      const up = reward(user, 25 + user.level * 2, 12, -12);
-      let txt = '✅ رانندگی کردی.';
-
-      if (Math.random() < 0.08) {
-        user.money -= 20;
-        txt += '\n🚓 جریمه شدی: 20$';
-      }
-
-      if (up) txt += `\n🎉 لول آپ! لول ${user.level}`;
-
-      clamp(user);
-      await sendMessage(chatId, `${txt}\n\n${statusText(user)}`, mainMenu);
-    }
-
-    // =========================
-    // FUN
-    // =========================
-    else if (data === 'fun_menu') {
-      await sendMessage(chatId, `${statusText(user)}\nتفریح انتخاب کن:`, [
-        [{ text: '🎬 سینما (-30$ | +15❤️)', callback_data: 'fun_movie' }],
-        [{ text: '🚶 پیاده‌روی (+10❤️)', callback_data: 'fun_walk' }],
-        [{ text: '🎵 موسیقی (+5❤️)', callback_data: 'fun_music' }],
-        ...back
-      ]);
-    }
-
-    else if (data === 'fun_movie') {
-      if (user.money < 30) {
-        await sendMessage(chatId, '💸 پول کافی نداری.', mainMenu);
-        return res.sendStatus(200);
-      }
-
-      user.money -= 30;
-      user.health += 15;
-      clamp(user);
-
-      await sendMessage(chatId, `🍿 سینما رفتی.\n\n${statusText(user)}`, mainMenu);
-    }
-
-    else if (data === 'fun_walk') {
-      user.health += 10;
-      let txt = '🚶 پیاده‌روی کردی.';
-
-      if (Math.random() < 0.15) {
-        user.money += 10;
-        txt += '\n💵 10$ پیدا کردی!';
-      }
-
-      clamp(user);
-      await sendMessage(chatId, `${txt}\n\n${statusText(user)}`, mainMenu);
-    }
-
-    else if (data === 'fun_music') {
-      user.health += 5;
-      clamp(user);
-      await sendMessage(chatId, `🎵 موسیقی گوش دادی.\n\n${statusText(user)}`, mainMenu);
-    }
-
-    // =========================
-    // FAMILY
-    // =========================
-    else if (data === 'family_menu') {
-      await sendMessage(chatId, `${statusText(user)}\nبخش خانواده:`, [
-        [{ text: '📞 تماس (+10 عشق)', callback_data: 'family_call' }],
-        [{ text: '🍽 شام (-20$ | +20 عشق | +5❤️)', callback_data: 'family_dinner' }],
-        [{ text: '🧸 وقت با بچه‌ها (+15 عشق)', callback_data: 'family_kids_time' }],
-        ...back
-      ]);
-    }
-
-    else if (data === 'family_call') {
-      user.familyLove += 10;
-      clamp(user);
-      await sendMessage(chatId, `📞 تماس گرفتی.\n\n${statusText(user)}`, mainMenu);
-    }
-
-    else if (data === 'family_dinner') {
-      if (user.money < 20) {
-        await sendMessage(chatId, '💸 پول کافی نداری.', mainMenu);
-        return res.sendStatus(200);
-      }
-
-      user.money -= 20;
-      user.familyLove += 20;
-      user.health += 5;
-      clamp(user);
-
-      await sendMessage(chatId, `🍽 شام خانوادگی.\n\n${statusText(user)}`, mainMenu);
-    }
-
-    else if (data === 'family_kids_time') {
-      if (user.children <= 0) {
-        await sendMessage(chatId, '👶 بچه‌ای نداری.', mainMenu);
-        return res.sendStatus(200);
-      }
-
-      user.familyLove += 15;
-      user.health += 5;
-      clamp(user);
-
-      await sendMessage(chatId, `🧸 با بچه‌ها وقت گذروندی.\n\n${statusText(user)}`, mainMenu);
-    }
-
-    // =========================
-    // MARRIAGE
-    // =========================
-    else if (data === 'marriage_menu') {
-      await sendMessage(chatId, `${statusText(user)}\nازدواج و بچه:`, [
-        [{ text: '💘 آشنایی (-20$)', callback_data: 'find_partner' }],
-        [{ text: '💍 ازدواج (-100$)', callback_data: 'get_married' }],
-        [{ text: '👶 بچه‌دار شدن (-50$)', callback_data: 'have_child' }],
-        ...back
-      ]);
-    }
-
-    else if (data === 'find_partner') {
-      if (user.married) {
-        await sendMessage(chatId, '💍 قبلاً ازدواج کردی.', mainMenu);
-        return res.sendStatus(200);
-      }
-
-      if (user.money < 20) {
-        await sendMessage(chatId, '💸 پول کافی نداری.', mainMenu);
-        return res.sendStatus(200);
-      }
-
-      const names = ['سارا', 'نگار', 'بهار', 'رها', 'امیر', 'علی', 'محمد', 'آرزو'];
-      const name = names[Math.floor(Math.random() * names.length)];
-
-      user.money -= 20;
-      user.spouse = name;
-      user.familyLove += 10;
-      clamp(user);
-
-      await sendMessage(chatId, `💘 با ${name} آشنا شدی.\n\n${statusText(user)}`, mainMenu);
-    }
-
-    else if (data === 'get_married') {
-      if (user.married) {
-        await sendMessage(chatId, '💍 قبلاً ازدواج کردی.', mainMenu);
-        return res.sendStatus(200);
-      }
-
-      if (!user.spouse) {
-        await sendMessage(chatId, 'اول باید آشنا بشی.', mainMenu);
-        return res.sendStatus(200);
-      }
-
-      if (user.money < 100) {
-        await sendMessage(chatId, '💸 پول کافی برای ازدواج نداری.', mainMenu);
-        return res.sendStatus(200);
-      }
-
-      user.money -= 100;
-      user.married = true;
-      user.familyLove += 25;
-      clamp(user);
-
-      await sendMessage(chatId, `🎉 ازدواج کردی با ${user.spouse}!\n\n${statusText(user)}`, mainMenu);
-    }
-
-    else if (data === 'have_child') {
-      if (!user.married) {
-        await sendMessage(chatId, 'اول باید ازدواج کنی.', mainMenu);
-        return res.sendStatus(200);
-      }
-
-      if (user.money < 50) {
-        await sendMessage(chatId, '💸 پول کافی نداری.', mainMenu);
-        return res.sendStatus(200);
-      }
-
-      user.money -= 50;
-      user.children += 1;
-      user.familyLove += 20;
-      clamp(user);
-
-      await sendMessage(chatId, `👶 بچه‌دار شدی!\n\n${statusText(user)}`, mainMenu);
-    }
-
-    // =========================
-    // HOUSE
-    // =========================
-    else if (data === 'house_menu') {
-      await sendMessage(chatId, `${statusText(user)}\nبخش خانه:`, [
-        [{ text: '🏚 اجاره کوچک (-40$)', callback_data: 'rent_small_house' }],
-        [{ text: '🏠 خرید معمولی (-200$)', callback_data: 'buy_normal_house' }],
-        [{ text: '🏡 خرید ویلا (-500$)', callback_data: 'buy_villa' }],
-        ...back
-      ]);
-    }
-
-    else if (data === 'rent_small_house') {
-      if (user.money < 40) {
-        await sendMessage(chatId, '💸 پول کافی نداری.', mainMenu);
-        return res.sendStatus(200);
-      }
-
-      user.money -= 40;
-      user.house = 'خانه کوچک اجاره‌ای';
-      user.familyLove += 5;
-      clamp(user);
-
-      await sendMessage(chatId, `🏚 خانه اجاره کردی.\n\n${statusText(user)}`, mainMenu);
-    }
-
-    else if (data === 'buy_normal_house') {
-      if (user.money < 200) {
-        await sendMessage(chatId, '💸 پول کافی نداری.', mainMenu);
-        return res.sendStatus(200);
-      }
-
-      user.money -= 200;
-      user.house = 'خانه معمولی';
-      user.familyLove += 15;
-      clamp(user);
-
-      await sendMessage(chatId, `🏠 خانه خریدی.\n\n${statusText(user)}`, mainMenu);
-    }
-
-    else if (data === 'buy_villa') {
-      if (user.money < 500) {
-        await sendMessage(chatId, '💸 پول کافی نداری.', mainMenu);
-        return res.sendStatus(200);
-      }
-
-      user.money -= 500;
-      user.house = 'ویلای بزرگ';
-      user.familyLove += 30;
-      clamp(user);
-
-      await sendMessage(chatId, `🏡 ویلا خریدی.\n\n${statusText(user)}`, mainMenu);
-    }
-
-    // =========================
-    // CAR
-    // =========================
-    else if (data === 'car_menu') {
-      await sendMessage(chatId, `${statusText(user)}\nماشین:`, [
-        [{ text: '🚗 خرید ماشین معمولی (-150$)', callback_data: 'buy_car_normal' }],
-        [{ text: '🚙 خرید ماشین خوب (-350$)', callback_data: 'buy_car_good' }],
-        [{ text: '🏎 ماشین لوکس (-800$)', callback_data: 'buy_car_luxury' }],
-        ...back
-      ]);
-    }
-
-    else if (data === 'buy_car_normal') {
-      if (user.money < 150) {
-        await sendMessage(chatId, '💸 پول کافی نداری.', mainMenu);
-        return res.sendStatus(200);
-      }
-
-      user.money -= 150;
-      user.car = 'ماشین معمولی';
-      clamp(user);
-
-      await sendMessage(chatId, `🚗 ماشین خریدی.\n\n${statusText(user)}`, mainMenu);
-    }
-
-    else if (data === 'buy_car_good') {
-      if (user.money < 350) {
-        await sendMessage(chatId, '💸 پول کافی نداری.', mainMenu);
-        return res.sendStatus(200);
-      }
-
-      user.money -= 350;
-      user.car = 'ماشین خوب';
-      clamp(user);
-
-      await sendMessage(chatId, `🚙 ماشین خوب خریدی.\n\n${statusText(user)}`, mainMenu);
-    }
-
-    else if (data === 'buy_car_luxury') {
-      if (user.money < 800) {
-        await sendMessage(chatId, '💸 پول کافی نداری.', mainMenu);
-        return res.sendStatus(200);
-      }
-
-      user.money -= 800;
-      user.car = 'ماشین لوکس';
-      clamp(user);
-
-      await sendMessage(chatId, `🏎 ماشین لوکس خریدی.\n\n${statusText(user)}`, mainMenu);
-    }
-
-    // =========================
-    // EDUCATION
-    // =========================
-    else if (data === 'edu_menu') {
-      await sendMessage(chatId, `${statusText(user)}\nتحصیل:`, [
-        [{ text: '📘 مدرسه (+10XP)', callback_data: 'edu_school' }],
-        [{ text: '🎓 دانشگاه (-100$ | +30XP)', callback_data: 'edu_university' }],
-        [{ text: '📚 دوره تخصصی (-50$ | +20XP)', callback_data: 'edu_course' }],
-        ...back
-      ]);
-    }
-
-    else if (data === 'edu_school') {
-      user.education = 'دیپلم';
-      reward(user, 0, 10, 0);
-      await sendMessage(chatId, `📘 به مدرسه رفتی.\n\n${statusText(user)}`, mainMenu);
-    }
-
-    else if (data === 'edu_university') {
-      if (user.money < 100) {
-        await sendMessage(chatId, '💸 پول کافی نداری.', mainMenu);
-        return res.sendStatus(200);
-      }
-
-      user.money -= 100;
-      user.education = 'دانشگاهی';
-      reward(user, 0, 30, 0);
-
-      await sendMessage(chatId, `🎓 دانشگاه رفتی.\n\n${statusText(user)}`, mainMenu);
-    }
-
-    else if (data === 'edu_course') {
-      if (user.money < 50) {
-        await sendMessage(chatId, '💸 پول کافی نداری.', mainMenu);
-        return res.sendStatus(200);
-      }
-
-      user.money -= 50;
-      user.education = 'دوره تخصصی';
-      reward(user, 0, 20, 0);
-
-      await sendMessage(chatId, `📚 دوره تخصصی گذروندی.\n\n${statusText(user)}`, mainMenu);
-    }
-
-    // =========================
-    // BANK
-    // =========================
-    else if (data === 'bank_menu') {
-      await sendMessage(chatId, `${statusText(user)}\nبانک:`, [
-        [{ text: '💵 واریز به بانک', callback_data: 'bank_deposit' }, { text: '💸 برداشت از بانک', callback_data: 'bank_withdraw' }],
-        ...back
-      ]);
-    }
-
-    else if (data === 'bank_deposit') {
-      const amount = Math.min(50, user.money);
-
-      if (amount <= 0) {
-        await sendMessage(chatId, 'پول نقدی نداری.', mainMenu);
-        return res.sendStatus(200);
-      }
-
-      user.money -= amount;
-      user.bank += amount;
-      clamp(user);
-
-      await sendMessage(chatId, `💵 ${amount}$ به بانک واریز شد.\n\n${statusText(user)}`, mainMenu);
-    }
-
-    else if (data === 'bank_withdraw') {
-      const amount = Math.min(50, user.bank);
-
-      if (amount <= 0) {
-        await sendMessage(chatId, 'موجودی بانک نداری.', mainMenu);
-        return res.sendStatus(200);
-      }
-
-      user.bank -= amount;
-      user.money += amount;
-      clamp(user);
-
-      await sendMessage(chatId, `💸 ${amount}$ از بانک برداشت شد.\n\n${statusText(user)}`, mainMenu);
-    }
-
-    // =========================
-    // BUSINESS
-    // =========================
-    else if (data === 'biz_menu') {
-      await sendMessage(chatId, `${statusText(user)}\nکسب‌وکار:`, [
-        [{ text: '🏪 مغازه کوچک (-200$)', callback_data: 'biz_shop' }],
-        [{ text: '🏬 شرکت متوسط (-500$)', callback_data: 'biz_company' }],
-        ...back
-      ]);
-    }
-
-    else if (data === 'biz_shop') {
-      if (user.money < 200) {
-        await sendMessage(chatId, '💸 پول کافی نداری.', mainMenu);
-        return res.sendStatus(200);
-      }
-
-      user.money -= 200;
-      user.business = 'مغازه کوچک';
-      reward(user, 0, 25, 0);
-
-      await sendMessage(chatId, `🏪 مغازه باز کردی.\n\n${statusText(user)}`, mainMenu);
-    }
-
-    else if (data === 'biz_company') {
-      if (user.money < 500) {
-        await sendMessage(chatId, '💸 پول کافی نداری.', mainMenu);
-        return res.sendStatus(200);
-      }
-
-      user.money -= 500;
-      user.business = 'شرکت متوسط';
-      reward(user, 0, 50, 0);
-
-      await sendMessage(chatId, `🏬 شرکت راه انداختی.\n\n${statusText(user)}`, mainMenu);
-    }
-
-    // =========================
-    // CRIME
-    // =========================
-    else if (data === 'crime_menu') {
-      await sendMessage(chatId, `${statusText(user)}\nجرم و زندان:`, [
-        [{ text: '😈 دزدی (+40$ | خطر زندان)', callback_data: 'steal' }],
-        [{ text: '🚔 تسلیم پلیس', callback_data: 'surrender' }],
-        ...back
-      ]);
-    }
-
-    else if (data === 'steal') {
-      if (Math.random() < 0.45) {
-        user.money += 40;
-        user.criminal = true;
-
-        let txt = '😈 دزدی موفق بودی و 40$ گرفتی.';
-
-        if (Math.random() < 0.5) {
-          user.jailTurns = 2;
-          txt += '\n🚔 گیر افتادی و رفتی زندان!';
-        }
-
-        clamp(user);
-        await sendMessage(chatId, `${txt}\n\n${statusText(user)}`, mainMenu);
-      } else {
-        user.criminal = true;
-        user.jailTurns = 2;
-        clamp(user);
-        await sendMessage(chatId, `🚔 دزدی ناموفق بود و دستگیر شدی.\n\n${statusText(user)}`, mainMenu);
-      }
-    }
-
-    else if (data === 'surrender') {
-      if (user.criminal) {
-        user.jailTurns = 1;
-        clamp(user);
-        await sendMessage(chatId, `🚔 خودت را تسلیم کردی.\n\n${statusText(user)}`, mainMenu);
-      } else {
-        await sendMessage(chatId, 'تو خلافکار نیستی.', mainMenu);
-      }
-    }
-
-    // =========================
-    // MAFIA
-    // =========================
-    else if (data === 'mafia_menu') {
-      await sendMessage(chatId, `${statusText(user)}\nمافیا:`, [
-        [{ text: '🕶 ورود به مافیا (-100$)', callback_data: 'join_mafia' }],
-        [{ text: '💣 مأموریت مافیا', callback_data: 'mafia_mission' }],
-        ...back
-      ]);
-    }
-
-    else if (data === 'join_mafia') {
-      if (user.money < 100) {
-        await sendMessage(chatId, '💸 برای ورود به مافیا 100$ لازم داری.', mainMenu);
-        return res.sendStatus(200);
-      }
-
-      user.money -= 100;
-      user.mafiaJoined = true;
-      user.mafiaRank = 'عضو';
-      user.criminal = true;
-      clamp(user);
-
-      await sendMessage(chatId, `🕶 وارد مافیا شدی!\n\n${statusText(user)}`, mainMenu);
-    }
-
-    else if (data === 'mafia_mission') {
-      if (!user.mafiaJoined) {
-        await sendMessage(chatId, 'اول باید عضو مافیا بشی.', mainMenu);
-        return res.sendStatus(200);
-      }
-
-      const win = Math.random() < 0.6;
-
-      if (win) {
-        user.money += 120;
-        user.xp += 30;
-
-        if (Math.random() < 0.2) {
-          user.health -= 10;
-        }
-
-        let txt = '💣 مأموریت موفق بود و 120$ گرفتی.';
-
-        if (levelUp(user)) {
-          txt += `\n🎉 لول آپ!`;
-        }
-
-        clamp(user);
-        await sendMessage(chatId, `${txt}\n\n${statusText(user)}`, mainMenu);
-      } else {
-        user.jailTurns = 2;
-        user.criminal = true;
-        clamp(user);
-        await sendMessage(chatId, `🚔 مأموریت لو رفت و رفتی زندان.\n\n${statusText(user)}`, mainMenu);
-      }
-    }
-
-    // =========================
-    // HOSPITAL
-    // =========================
-    else if (data === 'hospital') {
-      if (user.money < 50) {
-        await sendMessage(chatId, '?? هزینه بیمارستان 50$ است.', mainMenu);
-        return res.sendStatus(200);
-      }
-
-      user.money -= 50;
-      user.health = 100;
-      clamp(user);
-
-      await sendMessage(chatId, `🏥 درمان شدی.\n\n${statusText(user)}`, mainMenu);
-    }
-
-    else {
-      await sendMessage(chatId, '❓ گزینه نامعتبر است.', mainMenu);
-    }
-
-    return res.sendStatus(200);
   } catch (err) {
-    console.error('Webhook error:', err);
-    return res.sendStatus(500);
+    console.error('Webhook Error:', err)
   }
-});
+})
 
 app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`✅ Webhook path: /webhook/${SECRET_PATH}`);
-});
+  console.log(`Server running on port ${PORT}`)
+  console.log(`Webhook path: /${SECRET_PATH}`)
+})
